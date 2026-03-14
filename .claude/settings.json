@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch",
+      "Bash(ls *)",
+      "Bash(mkdir *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Write(c:\\projects\\superagent/**)",
+      "Edit(c:\\projects\\superagent/**)",
+      "Bash(gh api:*)",
+      "Bash(git clone:*)",
+      "Read(//tmp/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\projects\\superagent\\.claude",
+      "\\tmp"
+    ]
+  }
+}
