@@ -1,5 +1,5 @@
-# Run outputs
-runs/
+# Git
+.git/
 
 # Python
 __pycache__/

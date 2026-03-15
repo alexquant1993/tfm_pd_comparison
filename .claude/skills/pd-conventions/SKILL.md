@@ -17,14 +17,11 @@ Domain thresholds and interpretation rules for PD model development. Load this s
 
 ## WoE Requirements
 
-- Strictly monotonic preferred
-- Marginal violations (single bin out of order) -- document and flag, do not auto-exclude
-- Non-monotonic after 3 rebinning attempts -- exclude and document reason
-- Rebinning attempt protocol:
-  1. Attempt 1: increase `max_groups` by 2
-  2. Attempt 2: decrease `max_groups` by 2
-  3. Attempt 3: force monotonic direction using constraint
-  4. After 3 attempts still failing: mark as non-monotonic, document all attempts, flag for human review
+- Strictly monotonic preferred — enforced by OptimalBinning with `monotonic_trend="auto"`
+- Monotonicity is a constraint in the optimisation, not a post-hoc check
+- If OptimalBinning status is not OPTIMAL: try `monotonic_trend="auto_asc_desc"`, then explicit "ascending"/"descending" (pick higher IV)
+- Variables should not be excluded solely for monotonicity — optbinning enforces it by construction
+- Marginal violations (single bin out of order) in edge cases: document and flag, do not auto-exclude
 
 ---
 

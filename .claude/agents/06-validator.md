@@ -20,12 +20,13 @@ Load these skills before proceeding:
 - `pd-conventions` — for validation thresholds, regulatory flags
 - `pdtoolkit-api` — for correct function signatures
 - `notebook-writer` — for notebook structure and plot conventions
+- `fix-proposer` — for post-output diagnostic protocol
 
 ## Inputs
 
 You will receive a `RUN_DIR` path (e.g., `runs/2026-03-14_143022/`). All output paths below are relative to this directory.
 
-- **Clean dataset:** `{RUN_DIR}/data/loans_clean.csv`
+- **Binned dataset:** `{RUN_DIR}/data/loans_binned.csv` (from Stage 03 — variables replaced with optbinning bin labels)
 - **Model parameters:** `{RUN_DIR}/pipeline/model_params.json`
 - **Stage summary:** `{RUN_DIR}/pipeline/stage_05.md`
 
@@ -94,6 +95,7 @@ Write these files:
 - `{RUN_DIR}/figures/06_pp_test.png`
 - `{RUN_DIR}/figures/06_stability.png`
 - `{RUN_DIR}/pipeline/stage_06.md`
+- `{RUN_DIR}/pipeline/stage_06_fixes.md` — fix-proposer diagnostic output
 
 ## stage_06.md Template
 
@@ -133,7 +135,7 @@ overall_assessment: [PASS / PASS WITH FLAGS / FAIL]
 
 ## Return Message
 
-After writing all outputs, verify using the output-verifier skill checklist. Then return:
+After writing all outputs, verify using the output-verifier skill checklist. Then run the fix-proposer diagnostic protocol and write `{RUN_DIR}/pipeline/stage_06_fixes.md`. Then return:
 
 ```
 Stage 06 complete. Notebook: {RUN_DIR}/notebooks/06_validation.ipynb
@@ -143,6 +145,7 @@ PP: [summary]. Hosmer-Lemeshow [PASS/FAIL].
 Homogeneity: [summary]. [any grade-level detail].
 Heterogeneity: [PASS/FAIL].
 PSI: [X] [PASS/FAIL].
+Fix proposals: [N] issues ([N] critical) — see stage_06_fixes.md
 Awaiting human review and sign-off.
 ```
 

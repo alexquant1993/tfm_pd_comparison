@@ -18,6 +18,7 @@ Load these skills before proceeding:
 - `pd-conventions` — for all threshold and classification decisions
 - `pdtoolkit-api` — for correct function signatures
 - `notebook-writer` — for notebook structure and plot conventions
+- `fix-proposer` — for post-output diagnostic protocol
 
 ## Inputs
 
@@ -76,6 +77,7 @@ Write these files:
 - `{RUN_DIR}/figures/01_distributions.png`
 - `{RUN_DIR}/figures/01_correlation_matrix.png`
 - `{RUN_DIR}/pipeline/stage_01.md`
+- `{RUN_DIR}/pipeline/stage_01_fixes.md` — fix-proposer diagnostic output
 
 ## stage_01.md Template
 
@@ -98,11 +100,12 @@ data_quality_flags: [list or "None"]
 
 ## Return Message
 
-After writing all outputs, verify using the output-verifier skill checklist. Then return a message in this format:
+After writing all outputs, verify using the output-verifier skill checklist. Then run the fix-proposer diagnostic protocol and write `{RUN_DIR}/pipeline/stage_01_fixes.md`. Then return a message in this format:
 
 ```
 Stage 01 complete. Notebook: {RUN_DIR}/notebooks/01_data_quality.ipynb
 [N] variables analysed. [N] need special case imputation. [N] need outlier imputation.
 [N] recommended for exclusion. [N] high-correlation pairs flagged.
+Fix proposals: [N] issues ([N] critical) — see stage_01_fixes.md
 Awaiting human review before proceeding to Stage 02.
 ```

@@ -77,8 +77,35 @@ Replace risk factor modalities with Weight of Evidence (WoE) values.
 
 ## Binning
 
+### OptimalBinning (optbinning package — primary binning method for Stage 03)
+
+```python
+from optbinning import OptimalBinning
+```
+
+#### `OptimalBinning(name, dtype="numerical", solver="cp", monotonic_trend="auto", min_bin_size=0.05, max_n_bins=10, min_event_rate_diff=0.01)`
+Optimal binning using constraint programming. Replaces `pdt.cat_bin()` for Stage 03.
+- `name`: variable name (string)
+- `dtype`: "numerical" or "categorical"
+- `solver`: "cp" (constraint programming, default), "mip" (mixed-integer), or "ls" (LocalSolver)
+- `monotonic_trend`: "auto" (default — selects best monotonic trend), "ascending", "descending", "auto_asc_desc", "peak", "valley", or None (no constraint)
+- `min_bin_size`: minimum fraction of observations per bin (default 0.05)
+- `max_n_bins`: maximum number of bins (set to 10 for pdt compatibility)
+- `min_event_rate_diff`: minimum event rate difference between consecutive bins
+- `.fit(x, y)` — fit binning model (x: numpy array, y: 0/1 numpy array)
+- `.transform(x, metric="bins")` — returns bin label strings (e.g., "(-inf, 12.00)", "[12.00, 24.00)")
+- `.transform(x, metric="woe")` — returns WoE float values per observation
+- `.transform(x, metric="event_rate")` — returns event rate per observation
+- `.transform(x, metric="indices")` — returns bin index per observation
+- `.binning_table.build()` — returns DataFrame with columns: Bin, Count, Count (%), Non-event, Event, Event rate, WoE, IV, JS
+- `.binning_table.analysis()` — returns dict with keys: iv, gini, ks, quality_score
+- `.binning_table.plot(metric="woe", savefig=None, save_kwargs=None, add_special=True, add_missing=True)` — plot WoE profile. Use `savefig="path.png"` to save directly to disk. Use `save_kwargs={"dpi": 150, "bbox_inches": "tight"}` for save options. Always call `plt.close()` after.
+- `.binning_table.plot(metric="event_rate", savefig=None, save_kwargs=None)` — plot event rate profile. Same save options as above.
+- `.splits` — array of optimal split points (numerical variables only)
+- `.status` — solver status: "OPTIMAL", "FEASIBLE", "INFEASIBLE", etc.
+
 ### `cat_bin(x, y, sc=None, sc_merge="none", min_pct_obs=0.05, min_avg_rate=0.01, max_groups=None, force_trend="modalities") -> (DataFrame, Series)`
-Categorical risk factor binning with three-stage procedure (correction for min observations, min bad rate, and adjacent pooling).
+Legacy categorical risk factor binning with three-stage procedure. Superseded by OptimalBinning in Stage 03.
 - `sc`: special case values
 - `sc_merge`: how to merge special cases -- "none", "closest", "first", "last"
 - `min_pct_obs`: minimum percentage of observations per bin (default 5%)
@@ -139,6 +166,36 @@ Embedded block regression. Same parameters as staged_blocks.
 
 ### `ensemble_blocks(method, target, db, coding="WoE", blocks=None, p_value=0.05, miv_threshold=0.02, m_ch_p_val=0.05) -> EnsembleBlocksResult`
 Ensemble block regression. Same parameters as staged_blocks.
+
+---
+
+## Statsmodels Final Model Refit (Stage 04)
+
+After variable selection with `pdt.step_miv()`, refit the final model using statsmodels for the full summary output.
+
+```python
+import statsmodels.api as sm
+```
+
+### `sm.Logit(endog, exog)`
+Logistic regression model. `endog` is the binary target (array), `exog` is the design matrix with constant.
+- `sm.add_constant(X)` — prepend a constant column to the design matrix
+- `.fit()` → `LogitResults` object
+
+### `LogitResults` attributes
+- `.params` — coefficient estimates (Series)
+- `.bse` — standard errors (Series)
+- `.tvalues` — z-statistics (Series)
+- `.pvalues` — p-values (Series)
+- `.conf_int(alpha=0.05)` — confidence intervals (DataFrame, columns 0 and 1)
+- `.llf` — log-likelihood of fitted model
+- `.llnull` — log-likelihood of null (intercept-only) model
+- `.prsquared` — McFadden's pseudo R-squared
+- `.llr_pvalue` — likelihood ratio test p-value (overall model significance)
+- `.df_model` — degrees of freedom (number of predictors)
+- `.nobs` — number of observations
+- `.summary()` — full text summary (for notebook display)
+- `.predict(exog)` — predicted probabilities
 
 ---
 
