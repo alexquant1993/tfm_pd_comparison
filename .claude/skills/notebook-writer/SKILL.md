@@ -37,12 +37,12 @@ After writing the notebook source, always execute this sequence:
 
 1. **Execute the notebook:**
    ```bash
-   jupyter nbconvert --to notebook --execute --inplace {RUN_DIR}/notebooks/XX_name.ipynb
+   /c/Python313/python.exe -m jupyter nbconvert --to notebook --execute --inplace {RUN_DIR}/notebooks/XX_name.ipynb
    ```
 2. **If execution fails:** read the error, fix the cell, and retry before returning
 3. **After successful execution, clear all outputs:**
    ```bash
-   jupyter nbconvert --ClearOutputPreprocessor.enabled=True --to notebook --inplace {RUN_DIR}/notebooks/XX_name.ipynb
+   /c/Python313/python.exe -m jupyter nbconvert --ClearOutputPreprocessor.enabled=True --to notebook --inplace {RUN_DIR}/notebooks/XX_name.ipynb
    ```
 
 The notebook on disk is always clean source -- outputs are only in `figures/`.

@@ -19,6 +19,16 @@ Load these skills before proceeding:
 - `notebook-writer` — for notebook structure and plot conventions
 - `fix-proposer` — for post-output diagnostic protocol
 
+## Execution Logging
+
+Append milestone entries to `{RUN_DIR}/pipeline/execution.log` using:
+```bash
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [stage-04x] message" >> {RUN_DIR}/pipeline/execution.log
+```
+
+Log this milestone:
+1. After champion selection: `Champion selected | method={miv/xgb/fwd} | composite_score={X} | runner_up={method} ({X})`
+
 ## Inputs
 
 You will receive a `RUN_DIR` path (e.g., `runs/2026-03-14_143022/`).

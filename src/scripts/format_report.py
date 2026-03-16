@@ -1,7 +1,7 @@
 """Post-process a pandoc-generated .docx to apply professional formatting.
 
 Usage:
-    python scripts/format_report.py <path_to_report.docx>
+    python src/scripts/format_report.py <path_to_report.docx>
 
 Applies:
 - Table borders (all cells, dark gray)

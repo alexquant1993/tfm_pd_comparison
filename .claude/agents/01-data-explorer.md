@@ -20,6 +20,17 @@ Load these skills before proceeding:
 - `notebook-writer` — for notebook structure and plot conventions
 - `fix-proposer` — for post-output diagnostic protocol
 
+## Execution Logging
+
+Append milestone entries to `{RUN_DIR}/pipeline/execution.log` using:
+```bash
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [stage-01] message" >> {RUN_DIR}/pipeline/execution.log
+```
+
+Log these milestones:
+1. After loading dataset: `Dataset loaded | n_obs={N} | n_vars={N} | default_rate={X}%`
+2. After completing analysis: `Analysis complete | impute_outliers={N} | exclude={N} | high_corr_pairs={N}`
+
 ## Inputs
 
 You will receive a `RUN_DIR` path (e.g., `runs/2026-03-14_143022/`). All output paths below are relative to this directory.

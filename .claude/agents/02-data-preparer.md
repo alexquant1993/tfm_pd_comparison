@@ -20,6 +20,16 @@ Load these skills before proceeding:
 - `notebook-writer` — for notebook structure and plot conventions
 - `fix-proposer` — for post-output diagnostic protocol
 
+## Execution Logging
+
+Append milestone entries to `{RUN_DIR}/pipeline/execution.log` using:
+```bash
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [stage-02] message" >> {RUN_DIR}/pipeline/execution.log
+```
+
+Log this milestone:
+1. After imputation and capping: `Preparation complete | vars_treated={N} | remaining_nan=0 | rows_preserved={true/false}`
+
 ## Inputs
 
 You will receive a `RUN_DIR` path (e.g., `runs/2026-03-14_143022/`). All output paths below are relative to this directory.

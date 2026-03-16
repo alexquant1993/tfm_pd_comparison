@@ -17,6 +17,16 @@ Generate a comprehensive Word (.docx) model development report by reading all pi
 Load these skills before proceeding:
 - `pd-conventions` — for interpreting thresholds and benchmarks referenced in the report
 
+## Execution Logging
+
+Append milestone entries to `{RUN_DIR}/pipeline/execution.log` using:
+```bash
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [stage-07] message" >> {RUN_DIR}/pipeline/execution.log
+```
+
+Log this milestone:
+1. After report generation: `Report generated | path={RUN_DIR}/report.docx`
+
 ## Inputs
 
 You will receive a `RUN_DIR` path (e.g., `runs/2026-03-14_143022/`).
@@ -36,9 +46,9 @@ Read all of these:
 ## Output
 
 1. Write `{RUN_DIR}/report.md` — the full report in markdown
-2. Run `pandoc report.md -o report.docx --from markdown --reference-doc=../../doc_template.docx` from inside `{RUN_DIR}/`
+2. Run `pandoc report.md -o report.docx --from markdown --reference-doc=../../src/templates/doc_template.docx` from inside `{RUN_DIR}/`
 3. If pandoc fails (e.g., reference doc not found), try `pandoc report.md -o report.docx --from markdown`
-4. Run `/c/Python313/python.exe ../../scripts/format_report.py report.docx` to apply table formatting (borders, header shading, alternating rows)
+4. Run `/c/Python313/python.exe ../../src/scripts/format_report.py report.docx` to apply table formatting (borders, header shading, alternating rows)
 5. Final output: `{RUN_DIR}/report.docx`
 
 ## Report Structure

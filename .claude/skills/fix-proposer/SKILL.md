@@ -114,7 +114,7 @@ Run when any smoke test fails or stage flags exist. For each identified issue:
 | Category | Description | Diagnostic Signal | Fix Type |
 |---|---|---|---|
 | **A — Prompt Issue** | Agent followed its instructions correctly but instructions led to wrong output | Code ran without errors, output-verifier passed, but domain check fails | Proposed edit to `.claude/agents/XX.md` |
-| **B — Missing Utility** | Agent needs a computation that neither pdtoolkit nor standard libraries provide cleanly | Notebook contains multi-step ad-hoc computation that could be encapsulated | New function in `lib/pipeline_fixes/` |
+| **B — Missing Utility** | Agent needs a computation that neither pdtoolkit nor standard libraries provide cleanly | Notebook contains multi-step ad-hoc computation that could be encapsulated | New function in `src/pipeline_fixes/` |
 | **C — Approach Issue** | Chosen method is inappropriate for the data characteristics | Results are technically correct but domain-inappropriate | Documented recommendation for human review |
 
 ### Step 2: Trace Root Cause
@@ -174,7 +174,7 @@ If issues found, add for each issue:
 - **Rationale:** [why this fixes the issue]
 
 **[For Category B — New Utility Function]**
-- **Target file:** `lib/pipeline_fixes/[module_name].py`
+- **Target file:** `src/pipeline_fixes/[module_name].py`
 - **Function:** `[function_name](param1: type, param2: type) -> ReturnType`
 - **Description:** [what it does, one sentence]
 - **Implementation sketch:**

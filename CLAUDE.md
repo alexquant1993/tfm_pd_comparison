@@ -57,7 +57,65 @@ current_stage: 01
 - **Import:** `import sys; sys.path.insert(0, 'src'); import pdtoolkit as pdt`
 - **optbinning:** `pip install optbinning` — used by Stage 03 for constraint-programming optimal binning with monotonicity enforcement. Import: `from optbinning import OptimalBinning`
 - **xgboost:** `pip install xgboost` — used by Stage 04b for XGBoost feature importance-based variable selection. Import: `from xgboost import XGBClassifier`
-- **Pipeline fixes:** `lib/pipeline_fixes/` — utility functions proposed by the fix-proposer diagnostic. Import: `sys.path.insert(0, 'lib'); from pipeline_fixes.X import Y`
+- **Pipeline fixes:** `src/pipeline_fixes/` — utility functions proposed by the fix-proposer diagnostic. Import: `sys.path.insert(0, 'src'); from pipeline_fixes.X import Y`
+
+## Environment
+
+All commands must use these exact paths — do not search for alternatives.
+
+- **Python:** `/c/Python313/python.exe`
+- **Jupyter / nbconvert:** `/c/Python313/python.exe -m jupyter` (e.g., `/c/Python313/python.exe -m jupyter nbconvert ...`)
+- **pip:** `/c/Python313/python.exe -m pip`
+
+## Execution Log
+
+Every pipeline run produces `{RUN_DIR}/pipeline/execution.log` — a timestamped record of stage durations, verifier results, and key metrics.
+
+### Log Format
+
+```
+[YYYY-MM-DD HH:MM:SS] [LEVEL] [SOURCE] Message | key=value
+```
+
+- **LEVEL:** `INFO`, `WARN`, `ERROR`
+- **SOURCE:** `orchestrator`, `stage-01` through `stage-07` (including `stage-04a`, `stage-04b`, `stage-04c`, `stage-04x`)
+
+### Writing Log Entries
+
+```bash
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [orchestrator] Message" >> {RUN_DIR}/pipeline/execution.log
+```
+
+### Duration Tracking
+
+Shell state resets between Bash calls. Use a timer file:
+
+```bash
+# Before stage:
+date +%s > {RUN_DIR}/pipeline/.timer
+# After stage:
+STARTED=$(cat {RUN_DIR}/pipeline/.timer); DURATION=$(($(date +%s) - STARTED)); echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [orchestrator] Stage XX completed | duration=${DURATION}s | status=PASS" >> {RUN_DIR}/pipeline/execution.log
+```
+
+For the overall run, use `.timer_run` instead of `.timer`.
+
+### Orchestrator Log Points
+
+| When | Entry |
+|---|---|
+| Run start | `[INFO] [orchestrator] Run started \| mode={mode} \| dataset=data/loans.csv` |
+| Before each stage | Capture timer: `date +%s > {RUN_DIR}/pipeline/.timer` |
+| After each stage | `[INFO] [orchestrator] Stage {XX} completed \| duration={N}s \| status=PASS` |
+| Output-verifier pass | `[INFO] [orchestrator] Output-verifier stage {XX}: PASS ({N}/{N} checks)` |
+| Output-verifier fail | `[WARN] [orchestrator] Output-verifier stage {XX}: FAIL \| failed={list} \| retry={1\|2}` |
+| Fix-proposer done | `[INFO] [orchestrator] Fix-proposer stage {XX}: {N} issues ({N} critical)` |
+| Retry | `[WARN] [orchestrator] Stage {XX} retry {1\|2} \| reason={detail}` |
+| Stage failure | `[ERROR] [orchestrator] Stage {XX} FAILED after 2 retries` |
+| Parallel launch | `[INFO] [orchestrator] Parallel launch: stages 04a, 04b, 04c` |
+| Parallel complete | `[INFO] [orchestrator] Parallel stages complete \| wall_time={N}s \| succeeded={N}/3` |
+| Mode switch | `[INFO] [orchestrator] Mode switched: hil -> autonomous` |
+| Run end | `[INFO] [orchestrator] Run completed \| total_duration={N}s \| overall_assessment={PASS/FAIL}` |
+| Run abort | `[ERROR] [orchestrator] Run aborted at stage {XX} \| total_duration={N}s` |
 
 ## Run Directory Structure
 
@@ -93,6 +151,7 @@ runs/
       model_params_xgb.json
       model_params_fwd.json
       model_params.json          # copy of champion (canonical path for stages 05+)
+      execution.log              # timestamped execution log (orchestrator + subagent milestones)
     figures/
       01_missing_rates.png
       04a_*.png, 04b_*.png, 04c_*.png, 04x_*.png
@@ -106,7 +165,9 @@ runs/
 2. Create the run directory: `runs/<timestamp>/`
 3. Create subdirectories: `notebooks/`, `pipeline/`, `figures/`, `data/`
 4. Write `{RUN_DIR}/pipeline/run_config.md` with mode and metadata
-5. Pass the run directory path (e.g., `runs/2026-03-14_143022/`) to every subagent as `RUN_DIR`
+5. Write the initial log entry: `echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [orchestrator] Run started | mode={mode} | dataset=data/loans.csv" >> {RUN_DIR}/pipeline/execution.log`
+6. Capture run start time: `date +%s > {RUN_DIR}/pipeline/.timer_run`
+7. Pass the run directory path (e.g., `runs/2026-03-14_143022/`) to every subagent as `RUN_DIR`
 
 All subagent file paths are relative to `RUN_DIR`. For example:
 - `{RUN_DIR}/notebooks/01_data_quality.ipynb`
@@ -331,6 +392,7 @@ After the pipeline completes, the run directory contains:
 | `{RUN_DIR}/pipeline/stage_XX_fixes.md` | Fix-proposer diagnostic output per stage |
 | `{RUN_DIR}/pipeline/fixes_summary.md` | Consolidated fix proposals (generated before stage 07) |
 | `{RUN_DIR}/pipeline/model_params.json` | Final model parameters |
+| `{RUN_DIR}/pipeline/execution.log` | Timestamped execution log (stage durations, verifier results, milestones) |
 | `{RUN_DIR}/data/loans_clean.csv` | Prepared dataset |
 | `{RUN_DIR}/figures/*.png` | All plots referenced by notebooks |
 | `{RUN_DIR}/report.md` | Full report in markdown (source for DOCX) |
