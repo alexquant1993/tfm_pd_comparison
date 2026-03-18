@@ -1,0 +1,22 @@
+Variable,UCI_Attribute,UCI_Type,Type,dtype,Monotonicity,SpecialCodes,Values,Encoding
+Creditability,Class (recoded),,"Target",,,,,"0=Good (UCI 1), 1=Bad/Default (UCI 2)"
+Account Balance,Attr 1: Checking Account Status,qualitative,Ordinal,numerical,yes,4,1-4,"1=<0 DM (A11), 2=0-200 DM (A12), 3=>=200 DM/salary (A13). Special: 4=No checking account (A14)"
+Duration of Credit (month),Attr 2: Duration,numerical,Continuous,numerical,yes,,4-72,Months
+Payment Status of Previous Credit,Attr 3: Credit History,qualitative,Categorical,categorical,no,,0-4,"0=No credits/all paid (A30), 1=All paid at this bank (A31), 2=Existing paid duly (A32), 3=Delay in past (A33), 4=Critical/other credits (A34). Not naturally ordered — A34 'critical' has lowest DR."
+Purpose,Attr 4: Purpose,qualitative,Nominal,categorical,no,,"0-10 (gaps)","0=New car, 1=Used car, 2=Furniture, 3=Radio/TV, 4=Domestic appliance, 5=Repairs, 6=Education, 8=Retraining, 9=Business, 10=Others"
+Credit Amount,Attr 5: Credit Amount,numerical,Continuous,numerical,yes,,250-18424,DM
+Value Savings/Stocks,Attr 6: Savings Account/Bonds,qualitative,Ordinal,numerical,yes,5,1-5,"1=<100 DM (A61), 2=100-500 DM (A62), 3=500-1000 DM (A63), 4=>=1000 DM (A64). Special: 5=Unknown/no savings (A65)"
+Length of current employment,Attr 7: Present Employment Since,qualitative,Ordinal,numerical,yes,,1-5,"1=Unemployed (A71), 2=<1 yr (A72), 3=1-4 yr (A73), 4=4-7 yr (A74), 5=>=7 yr (A75). Ordered categorical per UCI."
+Instalment per cent,Attr 8: Installment Rate,numerical,Numerical,numerical,yes,,1-4,Installment rate as % of disposable income. UCI says numerical.
+Sex & Marital Status,Attr 9: Personal Status and Sex,qualitative,Nominal,categorical,no,,1-4,"1=Male divorced/separated (A91), 2=Female divorced/separated/married (A92), 3=Male single (A93), 4=Male married/widowed (A94). A95 (Female single) absent from data."
+Guarantors,Attr 10: Other Debtors/Guarantors,qualitative,Nominal,categorical,no,,1-3,"1=None (A101), 2=Co-applicant (A102), 3=Guarantor (A103)"
+Duration in Current address,Attr 11: Present Residence Since,numerical,Numerical,numerical,yes,,1-4,Years at current residence. UCI says numerical.
+Most valuable available asset,Attr 12: Property,qualitative,Ordinal,numerical,yes,4,1-4,"1=Real estate (A121), 2=Savings/life insurance (A122), 3=Car/other (A123). Special: 4=Unknown/no property (A124)"
+Age (years),Attr 13: Age,numerical,Continuous,numerical,yes,,19-75,Years
+Concurrent Credits,Attr 14: Other Installment Plans,qualitative,Nominal,categorical,no,,1-3,"1=Bank (A141), 2=Stores (A142), 3=None (A143)"
+Type of apartment,Attr 15: Housing,qualitative,Nominal,categorical,no,,1-3,"1=Rent (A151), 2=Own (A152), 3=Free (A153)"
+No of Credits at this Bank,Attr 16: Existing Credits Count,numerical,Numerical,numerical,yes,,1-4,Count of existing credits at this bank. UCI says numerical.
+Occupation,Attr 17: Job,qualitative,Ordinal,numerical,yes,,1-4,"1=Unemployed/unskilled non-resident (A171), 2=Unskilled resident (A172), 3=Skilled (A173), 4=Management/self-employed/highly qualified (A174). Explicitly called 'ordered categorical' by UCI."
+No of dependents,Attr 18: Dependents Count,numerical,Numerical,numerical,yes,,1-2,Number of people liable to provide maintenance for. UCI says numerical.
+Telephone,Attr 19: Telephone,qualitative,Binary,categorical,no,,1-2,"1=None (A191), 2=Yes registered (A192)"
+Foreign Worker,Attr 20: Foreign Worker,qualitative,Binary,categorical,no,,1-2,"1=Yes (A201), 2=No (A202)"

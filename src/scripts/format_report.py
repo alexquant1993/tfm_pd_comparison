@@ -4,6 +4,7 @@ Usage:
     python src/scripts/format_report.py <path_to_report.docx>
 
 Applies:
+- Title page: styled title/subtitle/date with horizontal rule and page break
 - Table borders (all cells, dark gray)
 - Header row: dark blue background (#003366) with bold white text
 - Alternating row shading (light gray #F2F2F2 on even data rows)
@@ -117,6 +118,107 @@ def format_table(table):
                 format_cell_text(cell, bold=False, color=RGBColor(0x1A, 0x1A, 0x1A))
 
 
+def format_title_page(doc):
+    """Style the title page elements and insert a page break after them.
+
+    Pandoc maps YAML front matter to paragraphs with Title, Subtitle, and
+    Author/Date styles.  This function:
+    - Pushes the title down the page with top spacing
+    - Adds a dark-blue horizontal rule below the subtitle/date block
+    - Inserts a page break so chapter 1 starts on a fresh page
+    """
+    TITLE_COLOR = RGBColor(0x00, 0x33, 0x66)
+    SUBTITLE_COLOR = RGBColor(0x4A, 0x6F, 0x8C)
+    DATE_COLOR = RGBColor(0x66, 0x66, 0x66)
+
+    title_block_styles = {"Title", "Subtitle", "Author", "Date"}
+    last_title_idx = None
+    found_title = False
+
+    for i, paragraph in enumerate(doc.paragraphs):
+        style_name = paragraph.style.name
+        text = paragraph.text.strip()
+
+        if style_name == "Title":
+            found_title = True
+            last_title_idx = i
+            pf = paragraph.paragraph_format
+            pf.space_before = Pt(180)
+            pf.space_after = Pt(4)
+            for run in paragraph.runs:
+                run.font.name = "Calibri"
+                run.font.size = Pt(32)
+                run.font.bold = True
+                run.font.color.rgb = TITLE_COLOR
+
+        elif style_name == "Subtitle":
+            last_title_idx = i
+            pf = paragraph.paragraph_format
+            pf.space_before = Pt(0)
+            pf.space_after = Pt(20)
+            for run in paragraph.runs:
+                run.font.name = "Calibri"
+                run.font.size = Pt(18)
+                run.font.bold = False
+                run.font.color.rgb = SUBTITLE_COLOR
+
+        elif style_name in ("Author", "Date"):
+            last_title_idx = i
+            pf = paragraph.paragraph_format
+            pf.space_before = Pt(4)
+            pf.space_after = Pt(4)
+            for run in paragraph.runs:
+                run.font.name = "Calibri"
+                run.font.size = Pt(12)
+                run.font.color.rgb = DATE_COLOR
+
+        elif found_title and style_name == "Normal" and text and len(text) <= 30:
+            # Pandoc outputs the date as a Normal paragraph right after
+            # Title/Subtitle.  Treat short Normal paragraphs (≤30 chars)
+            # immediately following the title block as date/metadata lines.
+            last_title_idx = i
+            pf = paragraph.paragraph_format
+            pf.space_before = Pt(4)
+            pf.space_after = Pt(4)
+            for run in paragraph.runs:
+                run.font.name = "Calibri"
+                run.font.size = Pt(12)
+                run.font.color.rgb = DATE_COLOR
+
+        elif found_title:
+            # First real content paragraph — stop scanning
+            break
+
+    if last_title_idx is None:
+        return  # No title block found
+
+    # Add a horizontal rule (bottom border) to the last title-block paragraph
+    last_para = doc.paragraphs[last_title_idx]
+    pPr = last_para._element.get_or_add_pPr()
+    border_xml = parse_xml(
+        f'<w:pBdr {nsdecls("w")}>'
+        f'  <w:bottom w:val="single" w:sz="6" w:space="12" w:color="003366"/>'
+        f"</w:pBdr>"
+    )
+    existing = pPr.find(qn("w:pBdr"))
+    if existing is not None:
+        pPr.remove(existing)
+    pPr.append(border_xml)
+
+    # Insert a page break after the title block
+    # Find the next paragraph after the title block and add page-break-before
+    next_idx = last_title_idx + 1
+    if next_idx < len(doc.paragraphs):
+        next_para = doc.paragraphs[next_idx]
+        next_pPr = next_para._element.get_or_add_pPr()
+        page_break = parse_xml(
+            f'<w:pageBreakBefore {nsdecls("w")}/>'
+        )
+        existing_pb = next_pPr.find(qn("w:pageBreakBefore"))
+        if existing_pb is None:
+            next_pPr.append(page_break)
+
+
 def format_paragraphs(doc):
     """Apply spacing to headings and body paragraphs."""
     # Spacing config: (space_before_pt, space_after_pt, line_spacing)
@@ -151,6 +253,9 @@ def main():
 
     docx_path = sys.argv[1]
     doc = Document(docx_path)
+
+    # Format title page
+    format_title_page(doc)
 
     # Format all tables
     table_count = 0

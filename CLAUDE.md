@@ -50,6 +50,8 @@ current_stage: 01
 
 - **Location:** `data/loans.csv`
 - **Target variable:** `Creditability` (1 = default)
+- **Variable types:** `data/variable_types.csv` — classifies each variable as Ordinal, Continuous, or Nominal with the correct `dtype` (numerical/categorical), monotonicity flag, and `SpecialCodes` column for OptimalBinning. Stage 03 **must** read this file to determine binning parameters.
+  - **`SpecialCodes` column:** Contains comma-separated integer codes that represent off-scale values (e.g., "no checking account", "no savings", "no property"). These codes must be passed to OptimalBinning via the `special_codes` parameter so they get their own bin while the remaining ordinal values are binned with monotonicity enforcement. Variables with special codes should use `dtype="numerical"` (not categorical).
 
 ## Toolkit
 

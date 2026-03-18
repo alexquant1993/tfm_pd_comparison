@@ -1,0 +1,189 @@
+{
+  "selection_method": "xgboost_importance",
+  "selected_variables": [
+    "Account Balance",
+    "Payment Status of Previous Credit",
+    "Value Savings/Stocks",
+    "Duration of Credit (month)",
+    "Age (years)",
+    "Purpose",
+    "Most valuable available asset"
+  ],
+  "xgb_importances": {
+    "Account Balance": 0.250467,
+    "Payment Status of Previous Credit": 0.119656,
+    "Value Savings/Stocks": 0.114191,
+    "Duration of Credit (month)": 0.11386,
+    "Age (years)": 0.105423,
+    "Purpose": 0.100965,
+    "Most valuable available asset": 0.098587,
+    "Credit Amount": 0.096852
+  },
+  "cumulative_importance_threshold": 0.9,
+  "woe_mappings": {
+    "Account Balance": [
+      {
+        "bin": "(-inf, 1.50)",
+        "woe": -0.818099
+      },
+      {
+        "bin": "Special",
+        "woe": 1.176263
+      },
+      {
+        "bin": "[1.50, 2.50)",
+        "woe": -0.401392
+      },
+      {
+        "bin": "[2.50, inf)",
+        "woe": 0.405465
+      }
+    ],
+    "Payment Status of Previous Credit": [
+      {
+        "bin": "['1' '0']",
+        "woe": -1.234071
+      },
+      {
+        "bin": "['2']",
+        "woe": -0.088319
+      },
+      {
+        "bin": "['3']",
+        "woe": -0.085158
+      },
+      {
+        "bin": "['4']",
+        "woe": 0.733741
+      }
+    ],
+    "Value Savings/Stocks": [
+      {
+        "bin": "(-inf, 1.50)",
+        "woe": -0.271358
+      },
+      {
+        "bin": "Special",
+        "woe": 0.704246
+      },
+      {
+        "bin": "[1.50, 2.50)",
+        "woe": -0.139552
+      },
+      {
+        "bin": "[2.50, inf)",
+        "woe": 0.862784
+      }
+    ],
+    "Duration of Credit (month)": [
+      {
+        "bin": "(-inf, 8.50)",
+        "woe": 1.280934
+      },
+      {
+        "bin": "[11.50, 15.50)",
+        "woe": 0.267315
+      },
+      {
+        "bin": "[15.50, 26.50)",
+        "woe": -0.096228
+      },
+      {
+        "bin": "[26.50, 34.50)",
+        "woe": -0.179468
+      },
+      {
+        "bin": "[34.50, 39.50)",
+        "woe": -0.572861
+      },
+      {
+        "bin": "[39.50, inf)",
+        "woe": -0.993901
+      },
+      {
+        "bin": "[8.50, 11.50)",
+        "woe": 0.553595
+      }
+    ],
+    "Age (years)": [
+      {
+        "bin": "(-inf, 25.50)",
+        "woe": -0.528844
+      },
+      {
+        "bin": "[25.50, 29.50)",
+        "woe": -0.086328
+      },
+      {
+        "bin": "[29.50, 34.50)",
+        "woe": -0.042447
+      },
+      {
+        "bin": "[34.50, inf)",
+        "woe": 0.314115
+      }
+    ],
+    "Purpose": [
+      {
+        "bin": "['10' '6']",
+        "woe": -0.587787
+      },
+      {
+        "bin": "['2' '4']",
+        "woe": -0.099235
+      },
+      {
+        "bin": "['3']",
+        "woe": 0.410063
+      },
+      {
+        "bin": "['5' '0']",
+        "woe": -0.353105
+      },
+      {
+        "bin": "['8' '1']",
+        "woe": 0.805625
+      },
+      {
+        "bin": "['9']",
+        "woe": -0.230524
+      }
+    ],
+    "Most valuable available asset": [
+      {
+        "bin": "(-inf, 1.50)",
+        "woe": 0.461035
+      },
+      {
+        "bin": "Special",
+        "woe": -0.586082
+      },
+      {
+        "bin": "[1.50, 2.50)",
+        "woe": -0.028573
+      },
+      {
+        "bin": "[2.50, inf)",
+        "woe": -0.034191
+      }
+    ]
+  },
+  "coefficients": {
+    "Account Balance": -0.778378,
+    "Payment Status of Previous Credit": -0.725379,
+    "Value Savings/Stocks": -0.736602,
+    "Duration of Credit (month)": -0.887482,
+    "Age (years)": -0.86124,
+    "Purpose": -1.020238,
+    "Most valuable available asset": -0.686714
+  },
+  "intercept": -0.846717,
+  "score_params": {
+    "base_score": 600,
+    "base_odds": 50,
+    "pdo": 20
+  },
+  "model_auc": 0.807,
+  "model_gini": 0.614,
+  "model_ks": 0.4886
+}

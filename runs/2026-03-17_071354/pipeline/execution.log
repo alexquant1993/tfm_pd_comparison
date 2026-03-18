@@ -1,0 +1,45 @@
+[2026-03-17 07:13:55] [INFO] [orchestrator] Run started | mode=autonomous | dataset=data/loans.csv
+[2026-03-17 07:15:04] [INFO] [stage-01] Stage 01 started
+[2026-03-17 07:17:40] [INFO] [stage-01] Dataset loaded | n_obs=1000 | n_vars=21 | default_rate=30.0%
+[2026-03-17 07:17:40] [INFO] [stage-01] Analysis complete | impute_outliers=3 | exclude=0 | high_corr_pairs=0
+[2026-03-17 07:18:14] [INFO] [orchestrator] Stage 01 completed | duration=190s | status=PASS
+[2026-03-17 07:18:14] [INFO] [orchestrator] Output-verifier stage 01: PASS
+[2026-03-17 07:18:51] [INFO] [stage-02] Stage 02 started | task=data_preparation
+[2026-03-17 07:22:45] [INFO] [stage-02] Preparation complete | vars_treated=3 | remaining_nan=0 | rows_preserved=true
+[2026-03-17 07:23:11] [INFO] [orchestrator] Stage 02 completed | duration=260s | status=PASS
+[2026-03-17 07:23:11] [INFO] [orchestrator] Output-verifier stage 02: PASS
+[2026-03-17 07:34:38] [INFO] [stage-03] Binning complete | n_analysed=20
+[2026-03-17 07:34:38] [INFO] [stage-03] Shortlist finalised | n_shortlisted=8 | iv_threshold=0.10 | min_iv=0.1013 | max_iv=0.666
+[2026-03-17 07:35:50] [INFO] [orchestrator] Stage 03 completed | duration=759s | status=PASS
+[2026-03-17 07:35:50] [INFO] [orchestrator] Output-verifier stage 03: PASS
+[2026-03-17 07:35:50] [INFO] [orchestrator] Parallel launch: stages 04a, 04b, 04c
+[2026-03-17 07:36:46] [INFO] [stage-04b] Stage 04b started | method=xgboost_importance
+[2026-03-17 07:37:05] [INFO] [stage-04c] Stage 04c started | method=forward_stepwise
+[2026-03-17 07:37:10] [INFO] [stage-04a] Stage 04a started | method=miv
+[2026-03-17 07:42:16] [INFO] [stage-04a] MIV selection | n_selected=8 | threshold=0.02
+[2026-03-17 07:42:17] [INFO] [stage-04a] Model fit | auc=0.8109 | gini=0.6218 | ks=0.5067 | signs_consistent=yes
+[2026-03-17 07:43:52] [INFO] [stage-04b] XGBoost selection | n_selected=7 | cumulative_threshold=0.90
+[2026-03-17 07:43:52] [INFO] [stage-04b] Model fit | auc=0.807 | gini=0.614 | ks=0.4886 | signs_consistent=yes
+[2026-03-17 07:43:52] [INFO] [stage-04b] Stage 04b completed | duration=425s | status=PASS
+[2026-03-17 07:48:45] [INFO] [stage-04c] Forward selection | n_selected=8 | p_value_threshold=0.05
+[2026-03-17 07:48:45] [INFO] [stage-04c] Model fit | auc=0.8109 | gini=0.6218 | ks=0.5067 | signs_consistent=yes
+[2026-03-17 07:48:52] [INFO] [orchestrator] Stage 04c completed | duration=706s | status=PASS
+[2026-03-17 07:49:34] [INFO] [orchestrator] Parallel stages complete | wall_time=822s | succeeded=3/3
+[2026-03-17 07:50:04] [INFO] [stage-04x] Model comparison started | models=3 (miv, xgb, fwd)
+[2026-03-17 07:54:01] [INFO] [stage-04x] Champion selected | method=miv | composite_score=0.9207 | runner_up=forward_stepwise (0.9207)
+[2026-03-17 07:55:10] [INFO] [orchestrator] Stage 04x completed | duration=336s | status=PASS
+[2026-03-17 07:55:10] [INFO] [orchestrator] Output-verifier stage 04x: PASS
+[2026-03-17 07:56:09] [INFO] [stage-05] Stage 05 calibration started
+[2026-03-17 08:00:06] [INFO] [stage-05] Calibration complete | n_grades=8 | target_ct=30.00% | achieved_ct=30.00% | pd_ordering=valid
+[2026-03-17 08:00:06] [INFO] [orchestrator] Stage 05 completed | duration=237s | status=PASS
+[2026-03-17 08:00:37] [INFO] [orchestrator] Stage 05 completed | duration=268s | status=PASS
+[2026-03-17 08:00:37] [INFO] [orchestrator] Output-verifier stage 05: PASS
+[2026-03-17 08:01:21] [INFO] [stage-06] Validation started | model=miv | n_vars=8 | auc=0.8109
+[2026-03-17 08:08:13] [INFO] [stage-06] Validation complete | overall=PASS WITH FLAGS | dp=PASS | pp=FAIL | flags=1 | duration=412s
+[2026-03-17 08:08:38] [INFO] [orchestrator] Stage 06 completed | duration=437s | status=PASS
+[2026-03-17 08:08:38] [INFO] [orchestrator] Output-verifier stage 06: PASS (PASS WITH FLAGS)
+[2026-03-17 08:10:17] [INFO] [stage-07] Report generation started
+[2026-03-17 08:14:55] [INFO] [stage-07] Report generated | path=runs/2026-03-17_071354/report.docx | duration=277s
+[2026-03-17 08:15:13] [INFO] [orchestrator] Stage 07 completed | duration=295s | status=PASS
+[2026-03-17 08:15:13] [INFO] [orchestrator] Run completed | total_duration=3678s | overall_assessment=PASS WITH FLAGS
+[2026-03-17 21:46:30] [INFO] [stage-07] Report generated | path=runs/2026-03-17_071354/report.docx
