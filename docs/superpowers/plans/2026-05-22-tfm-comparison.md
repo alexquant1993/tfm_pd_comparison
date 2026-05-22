@@ -1,14 +1,24 @@
-# TFM vs WoE-Logit PD Comparison — Implementation Plan
+# TFM vs WoE-Logit PD Comparison — Implementation Plan (v2, post-Codex revision)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a reproducible 10-fold CV benchmark in `comparison/` that pits 4 tabular foundation models (TabPFN v2, TabICL, TabDPT, CARTE) against the `pd-autopilot` WoE-logit champion plus three classical baselines (XGB, LightGBM, plain logit) on German Credit (n=1,000), with paired statistical tests and two passes (defaults + light Optuna tuning for classicals only).
+**Goal:** Build a reproducible 10-fold CV benchmark in `comparison/` that pits 4 tabular foundation models (TabPFN v2, TabICL, TabDPT, CARTE) against a fold-safe re-implementation of the `pd-autopilot` WoE-logit champion plus three classical baselines (XGB, LightGBM, plain logit) on German Credit (n=1,000), with paired DeLong + Wilcoxon tests and two passes (defaults + properly nested Optuna tuning for classicals only).
 
-**Architecture:** Sibling directory `comparison/` with `uv`-managed environment. Thin notebook orchestrates a per-model wrapper for each of 8 models behind a uniform `PDModel` protocol. Shared modules for data loading, fold creation, and metrics. Per-fold CSV written row-by-row (crash-safe). Tests under `tests/` use `pytest`.
+**Architecture:** Sibling directory `comparison/` with `uv`-managed environment. Thin notebook orchestrates a per-model wrapper for each of 8 models behind a uniform `PDModel` protocol. Shared modules for fold-safe preprocessing, fold creation, metrics, and tuning. Per-fold CSV + predictions parquet written row-by-row from the very first runner version (crash-safe). Tests under `tests/` use `pytest`.
 
-**Tech Stack:** `uv` (env mgmt), Python ≥ 3.10, pandas, numpy, scikit-learn, scipy, matplotlib, optbinning, xgboost, lightgbm, tabpfn, tabicl, tabdpt, carte-ai, optuna, jupyter, tqdm, pytest.
+**Tech Stack:** `uv` (env mgmt), Python ≥ 3.10, pandas, numpy, scikit-learn, scipy, matplotlib, optbinning, xgboost, lightgbm, tabpfn, tabicl, tabdpt, carte-ai, optuna, jupyter, tqdm, pytest, pyarrow.
 
 **Spec reference:** `docs/superpowers/specs/2026-05-22-tfm-comparison-design.md`
+
+**Changes from v1 of this plan (in response to Codex review, see commit `842af30`):**
+- New Task 3: `preprocessing.py` with `fold_safe_iqr_cap`.
+- Task 2 (`data_loader`) now fixes the `_parse_special_codes` int/float/NaN bug and adds an explicit special-codes test.
+- Task 9 (`woe_logit`): switches to `LogisticRegression(penalty=None)`; hard-codes monotonic trends per variable; adds CP→MIP solver fallback; the sanity test is now coefficient-level vs `model_params.json` (±0.05) instead of an AUC band.
+- Task 17 (`runner`): applies `fold_safe_iqr_cap` inside the fold loop and persists predictions parquet from v1 (no retrofit). Outer loop reordered to fold-first/model-second so per-fold preprocessing happens once.
+- Task 18 (`tuning`): rewritten as `tune_classicals_for_fold(X_train_outer, y_train_outer, types_meta, seed)` invoked inside the runner's outer-fold loop; inner 5-fold CV lives entirely inside the outer-training fold. The single-shot `tune_xgb()` / `tune_lgbm()` / `tune_logit()` API is gone.
+- Task 21 (`summary`): computes DeLong + Wilcoxon from the predictions parquet (both already exist when summary runs); narrow-claim disclaimer rendered into every `summary_*.md` header.
+- v1 Task 21 (retrofit predictions persistence) deleted — rolled into v2 Task 17.
+- Acceptance criteria expanded to 10 items, each tied to a named test or artefact.
 
 ---
 
@@ -38,17 +48,17 @@ Expected: prints a version like `uv 0.4.x`.
 cd comparison 2>/dev/null || mkdir comparison && cd comparison
 uv init --python 3.12 --no-readme --no-workspace
 ```
-This creates `pyproject.toml`, `.python-version`, and downloads CPython 3.12 into uv's cache.
+Creates `pyproject.toml`, `.python-version`, and downloads CPython 3.12 into uv's cache.
 
 - [ ] **Step 3: Add dependencies (core first, ML libs second)**
 
 ```bash
-uv add pandas numpy scikit-learn scipy matplotlib tqdm
+uv add pandas numpy scikit-learn scipy matplotlib tqdm pyarrow
 uv add optbinning xgboost lightgbm optuna
 uv add jupyter ipykernel
 uv add --dev pytest
 ```
-Note: `tabpfn`, `tabicl`, `tabdpt`, `carte-ai` are added in their respective wrapper tasks because they each may need a GitHub install fallback.
+`pyarrow` is added from the start because the runner (Task 17) persists predictions parquet from its first version — predictions persistence is a first-class spec requirement, not a retrofit. TFM packages (`tabpfn`, `tabicl`, `tabdpt`, `carte-ai`) are added in their respective wrapper tasks because each may need a GitHub fallback.
 
 - [ ] **Step 4: Create directory skeleton**
 
@@ -82,6 +92,10 @@ Benchmarks 4 tabular foundation models against the pd-autopilot WoE-logit
 champion on German Credit. See
 [design spec](../docs/superpowers/specs/2026-05-22-tfm-comparison-design.md).
 
+**Scope (narrow):** Pure discrimination only. Does NOT support the claim that
+"TFMs are better PD models" — that would require calibration, rating grades,
+PSI, and OOT validation, all out of scope here.
+
 ## Setup
 
 ```bash
@@ -93,46 +107,51 @@ uv sync              # creates .venv from uv.lock
 
 ```bash
 # Always use `uv run` so you get this project's venv, not your system/conda Python.
-uv run pytest                       # tests
+uv run pytest -m "not slow"          # fast tests
+uv run pytest -m slow                # TFM smoke tests (downloads weights ~1 GB)
 uv run python -m src.runner --pass defaults
 uv run python -m src.runner --pass tuned
-uv run jupyter lab notebooks/       # interactive analysis
+uv run python -m src.summary         # build summary_*.md from CSVs + parquets
+uv run jupyter lab notebooks/        # interactive analysis
 ```
 
 ## Outputs
 
-`results/per_fold_defaults.csv`, `results/per_fold_tuned.csv`,
-`results/summary_defaults.md`, `results/summary_tuned.md`, and figures
-under `results/figures/`.
+- `results/per_fold_defaults.csv`, `results/per_fold_tuned.csv` — metrics × fold × model
+- `results/predictions_defaults.parquet`, `results/predictions_tuned.parquet` — OOF predictions
+- `results/summary_defaults.md`, `results/summary_tuned.md` — paired tests, mean ± std tables
+- `results/figures/` — ROC overlays, reliability curves, AUC boxplots, forest plots
 ````
 
 - [ ] **Step 7: Verify env works**
 
 ```bash
 cd comparison
-uv run python -c "import pandas, numpy, sklearn, optbinning, xgboost, lightgbm, optuna; print('ok')"
+uv run python -c "import pandas, numpy, sklearn, optbinning, xgboost, lightgbm, optuna, pyarrow; print('ok')"
 ```
 Expected: prints `ok`.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-cd ..    # back to repo root
+cd ..
 git add comparison/pyproject.toml comparison/uv.lock comparison/.python-version \
         comparison/.gitignore comparison/README.md \
         comparison/src/__init__.py comparison/src/models/__init__.py \
         comparison/tests/__init__.py \
         comparison/notebooks/.gitkeep comparison/results/figures/.gitkeep
-git commit -m "feat(comparison): bootstrap uv project with core deps"
+git commit -m "feat(comparison): bootstrap uv project with core deps + pyarrow"
 ```
 
 ---
 
-## Task 2: Data loader
+## Task 2: Data loader (with fixed special-codes parsing)
 
 **Files:**
 - Create: `comparison/src/data_loader.py`
 - Create: `comparison/tests/test_data_loader.py`
+
+The critical fix vs v1 of this plan: `_parse_special_codes` must accept int, float, NaN, and "4,5"-style strings uniformly. The CSV stores values like `4` (int), `4,5` (string), `NaN` (empty); pandas reads the column as `float64` if all-numeric-or-empty, or `object` if any cell has a comma.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -140,7 +159,8 @@ Create `comparison/tests/test_data_loader.py`:
 ```python
 from pathlib import Path
 import pandas as pd
-from src.data_loader import load, carte_decode
+import numpy as np
+from src.data_loader import load, carte_decode, _parse_special_codes
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -149,7 +169,7 @@ def test_load_shape_and_target():
     assert X.shape == (1000, 20)
     assert y.shape == (1000,)
     assert set(y.unique()) == {0, 1}
-    assert abs(y.mean() - 0.30) < 0.01   # 30% default rate
+    assert abs(y.mean() - 0.30) < 0.01
     assert "Creditability" not in X.columns
 
 def test_meta_has_all_columns():
@@ -159,10 +179,27 @@ def test_meta_has_all_columns():
         assert info["type"] in {"nominal", "ordinal", "continuous"}
         assert info["dtype"] in {"numerical", "categorical"}
 
+def test_parse_special_codes_handles_all_types():
+    # The bug v1 had: only str was handled.
+    assert _parse_special_codes("4") == [4]
+    assert _parse_special_codes("4,5") == [4, 5]
+    assert _parse_special_codes(4) == [4]
+    assert _parse_special_codes(4.0) == [4]
+    assert _parse_special_codes(np.nan) == []
+    assert _parse_special_codes(None) == []
+    assert _parse_special_codes("") == []
+
+def test_special_codes_actually_loaded_for_three_known_vars():
+    X, y, meta = load(repo_root=REPO_ROOT)
+    assert meta["Account Balance"]["special_codes"] == [4]
+    assert meta["Value Savings/Stocks"]["special_codes"] == [5]
+    assert meta["Most valuable available asset"]["special_codes"] == [4]
+    # And vars without special codes report []
+    assert meta["Purpose"]["special_codes"] == []
+
 def test_carte_decode_replaces_purpose():
     X, y, meta = load(repo_root=REPO_ROOT)
     X_str = carte_decode(X, meta)
-    # Purpose=3 must become "Radio/TV" (or similar string) — not the integer
     assert X_str["Purpose"].dtype == object
     assert not (X_str["Purpose"] == 3).any()
     assert "Radio/TV" in X_str["Purpose"].astype(str).str.cat(sep="|")
@@ -174,7 +211,7 @@ def test_carte_decode_keeps_continuous_numeric():
     assert pd.api.types.is_numeric_dtype(X_str["Credit Amount"])
 ```
 
-- [ ] **Step 2: Run test, confirm failure**
+- [ ] **Step 2: Run, confirm failure**
 
 ```bash
 cd comparison && uv run pytest tests/test_data_loader.py -v
@@ -188,36 +225,61 @@ Create `comparison/src/data_loader.py`:
 """Load German Credit dataset and metadata from the parent repo."""
 from __future__ import annotations
 import re
+import math
 from pathlib import Path
 import pandas as pd
+import numpy as np
 
 TARGET = "Creditability"
 
-def _parse_encoding(encoding_str: str) -> dict[int, str]:
+def _parse_encoding(encoding_str) -> dict[int, str]:
     """Parse the Encoding column into {int_code: human_label}.
 
-    Format examples:
+    Format examples (raw CSV cells):
       '1=<0 DM (A11), 2=0-200 DM (A12), 3=>=200 DM/salary (A13). Special: 4=No checking account (A14)'
       '0=New car, 1=Used car, 2=Furniture, 3=Radio/TV, ...'
     """
     if not isinstance(encoding_str, str):
         return {}
     mapping: dict[int, str] = {}
-    # Strip parenthetical UCI codes like "(A11)"
     cleaned = re.sub(r"\([^)]*\)", "", encoding_str)
-    # Drop "Special:" prefix on tail items
     cleaned = cleaned.replace("Special:", ",")
-    # Split on commas or periods
     for part in re.split(r"[,.]", cleaned):
         m = re.match(r"\s*(-?\d+)\s*=\s*(.+?)\s*$", part)
         if m:
             mapping[int(m.group(1))] = m.group(2).strip()
     return mapping
 
-def _parse_special_codes(s: str) -> list[int]:
-    if not isinstance(s, str) or not s.strip():
+def _parse_special_codes(s) -> list[int]:
+    """Parse a SpecialCodes cell that may arrive as int, float, NaN, str, or None.
+
+    Examples:
+      "4"     → [4]
+      "4,5"   → [4, 5]
+      4       → [4]
+      4.0     → [4]
+      NaN     → []
+      None    → []
+      ""      → []
+    """
+    if s is None:
         return []
-    return [int(c.strip()) for c in s.split(",") if c.strip()]
+    # NaN check (works for float NaN)
+    if isinstance(s, float) and math.isnan(s):
+        return []
+    # Integer cell from pandas
+    if isinstance(s, (int, np.integer)):
+        return [int(s)]
+    # Float cell from pandas (most common when SpecialCodes col is read as float64)
+    if isinstance(s, float):
+        return [int(s)]
+    # String cell (including comma-separated like "4,5")
+    if isinstance(s, str):
+        s = s.strip()
+        if not s:
+            return []
+        return [int(c.strip()) for c in s.split(",") if c.strip()]
+    return []
 
 def load(repo_root: Path | str) -> tuple[pd.DataFrame, pd.Series, dict]:
     """Load loans.csv + variable_types.csv from the parent repo.
@@ -247,8 +309,8 @@ def load(repo_root: Path | str) -> tuple[pd.DataFrame, pd.Series, dict]:
             "type": type_map.get(row["Type"], "continuous"),
             "dtype": row["dtype"] if isinstance(row["dtype"], str) else "numerical",
             "monotonicity": row["Monotonicity"] if isinstance(row["Monotonicity"], str) else "no",
-            "special_codes": _parse_special_codes(row.get("SpecialCodes", "")),
-            "encoding": _parse_encoding(row.get("Encoding", "")),
+            "special_codes": _parse_special_codes(row.get("SpecialCodes")),
+            "encoding": _parse_encoding(row.get("Encoding")),
         }
     return X, y, meta
 
@@ -271,23 +333,180 @@ def carte_decode(X: pd.DataFrame, meta: dict) -> pd.DataFrame:
     return out
 ```
 
-- [ ] **Step 4: Run tests, confirm pass**
+- [ ] **Step 4: Run tests, confirm all pass**
 
 ```bash
 cd comparison && uv run pytest tests/test_data_loader.py -v
+```
+Expected: 6 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd .. && git add comparison/src/data_loader.py comparison/tests/test_data_loader.py
+git commit -m "feat(comparison): data loader with int/float/NaN special-codes parsing"
+```
+
+---
+
+## Task 3: Fold-safe preprocessing (NEW)
+
+**Files:**
+- Create: `comparison/src/preprocessing.py`
+- Create: `comparison/tests/test_preprocessing.py`
+
+`fold_safe_iqr_cap` computes Q1, Q3, IQR, and the upper cap (`Q3 + 1.5·IQR`) from the outer-training fold only, then applies the cap to both outer-training and outer-test. This mirrors Stage 02's recipe but eliminates the leakage caused by computing caps on all 1,000 rows.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `comparison/tests/test_preprocessing.py`:
+```python
+from pathlib import Path
+import numpy as np
+import pandas as pd
+from src.data_loader import load
+from src.preprocessing import fold_safe_iqr_cap, CONTINUOUS_COLS_TO_CAP
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+def test_caps_derived_from_train_only():
+    """If the test set has a huge outlier, it MUST still be capped at the train
+    distribution's Q3 + 1.5*IQR — meaning the cap comes from train, not test."""
+    X = pd.DataFrame({
+        "Duration of Credit (month)": np.r_[np.arange(1, 41), [999.0]],   # train normal, test outlier
+        "Credit Amount": np.arange(100, 141, dtype=float).tolist() + [1.0],
+        "Age (years)": np.arange(20, 60, dtype=float).tolist() + [30.0],
+        "other": np.zeros(41),
+    })
+    meta = {
+        "Duration of Credit (month)": {"type": "continuous"},
+        "Credit Amount": {"type": "continuous"},
+        "Age (years)": {"type": "continuous"},
+        "other": {"type": "nominal"},
+    }
+    train_idx = np.arange(40)
+    test_idx = np.array([40])
+    X_tr, X_te, caps = fold_safe_iqr_cap(X.iloc[train_idx], X.iloc[test_idx], meta)
+    # test-row 999 must have been capped at the TRAIN distribution's upper cap
+    expected_cap = np.quantile(np.arange(1, 41), 0.75) + 1.5 * (
+        np.quantile(np.arange(1, 41), 0.75) - np.quantile(np.arange(1, 41), 0.25)
+    )
+    assert X_te["Duration of Credit (month)"].iloc[0] == expected_cap
+    assert caps["Duration of Credit (month)"] == expected_cap
+
+def test_only_upper_tail_capped():
+    """Stage 02 uses upper-tail capping only — small values left alone."""
+    X = pd.DataFrame({
+        "Duration of Credit (month)": [1.0, 2.0, 3.0, 4.0, 100.0],
+        "Credit Amount": [1.0] * 5,
+        "Age (years)": [1.0] * 5,
+        "other": [0] * 5,
+    })
+    meta = {
+        "Duration of Credit (month)": {"type": "continuous"},
+        "Credit Amount": {"type": "continuous"},
+        "Age (years)": {"type": "continuous"},
+        "other": {"type": "nominal"},
+    }
+    X_tr, X_te, caps = fold_safe_iqr_cap(X, X.iloc[[0]], meta)
+    # smallest value unchanged
+    assert X_tr["Duration of Credit (month)"].iloc[0] == 1.0
+    # largest capped
+    assert X_tr["Duration of Credit (month)"].iloc[-1] < 100.0
+
+def test_only_three_continuous_columns_capped():
+    """Stage 02 capped exactly Duration / Credit Amount / Age. Other cols untouched."""
+    X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, caps = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
+    assert set(caps.keys()) == set(CONTINUOUS_COLS_TO_CAP)
+    # Untouched columns unchanged
+    pd.testing.assert_series_equal(X_tr["Account Balance"], X.iloc[:800]["Account Balance"])
+    pd.testing.assert_series_equal(X_te["Purpose"], X.iloc[800:]["Purpose"])
+
+def test_idempotent_when_no_outliers_present():
+    X = pd.DataFrame({
+        "Duration of Credit (month)": [10.0] * 100,
+        "Credit Amount": [500.0] * 100,
+        "Age (years)": [35.0] * 100,
+    })
+    meta = {c: {"type": "continuous"} for c in X.columns}
+    X_tr, X_te, caps = fold_safe_iqr_cap(X.iloc[:80], X.iloc[80:], meta)
+    pd.testing.assert_frame_equal(X_tr, X.iloc[:80])
+    pd.testing.assert_frame_equal(X_te, X.iloc[80:])
+```
+
+- [ ] **Step 2: Run, confirm fail**
+
+```bash
+cd comparison && uv run pytest tests/test_preprocessing.py -v
+```
+
+- [ ] **Step 3: Implement `preprocessing.py`**
+
+Create `comparison/src/preprocessing.py`:
+```python
+"""Fold-safe outlier capping. Caps are derived from the outer-training fold
+only, then applied to both the outer-training and outer-test folds.
+
+This replaces the leaky approach of using the pre-computed loans_clean.csv
+which had caps fit on all 1,000 rows in Stage 02.
+"""
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+
+# Stage 02 capped exactly these three continuous columns. We mirror that
+# choice for fold-safe comparability with the report's recipe.
+CONTINUOUS_COLS_TO_CAP = [
+    "Duration of Credit (month)",
+    "Credit Amount",
+    "Age (years)",
+]
+
+def _upper_cap(values: np.ndarray) -> float:
+    q1 = np.quantile(values, 0.25)
+    q3 = np.quantile(values, 0.75)
+    return float(q3 + 1.5 * (q3 - q1))
+
+def fold_safe_iqr_cap(
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    types_meta: dict,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    """Apply IQR upper-tail capping derived from X_train to both X_train and X_test.
+
+    Returns: (X_train_capped, X_test_capped, caps_dict)
+    """
+    X_tr = X_train.copy()
+    X_te = X_test.copy()
+    caps: dict[str, float] = {}
+    for col in CONTINUOUS_COLS_TO_CAP:
+        if col not in X_tr.columns:
+            continue
+        cap = _upper_cap(X_tr[col].values)
+        caps[col] = cap
+        X_tr[col] = X_tr[col].clip(upper=cap)
+        X_te[col] = X_te[col].clip(upper=cap)
+    return X_tr, X_te, caps
+```
+
+- [ ] **Step 4: Run, confirm pass**
+
+```bash
+cd comparison && uv run pytest tests/test_preprocessing.py -v
 ```
 Expected: 4 passed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd .. && git add comparison/src/data_loader.py comparison/tests/test_data_loader.py
-git commit -m "feat(comparison): data loader with CARTE string decoder"
+cd .. && git add comparison/src/preprocessing.py comparison/tests/test_preprocessing.py
+git commit -m "feat(comparison): fold-safe IQR upper-tail capping"
 ```
 
 ---
 
-## Task 3: Cross-validation folds
+## Task 4: Cross-validation folds
 
 **Files:**
 - Create: `comparison/src/cv.py`
@@ -314,7 +533,7 @@ def test_make_folds_stratified():
     folds = make_folds(y, n_splits=10, seed=42)
     for tr, te in folds:
         rate = y.iloc[te].mean()
-        assert 0.25 <= rate <= 0.35   # stratified ~ 0.30
+        assert 0.25 <= rate <= 0.35
 
 def test_make_folds_deterministic():
     y = pd.Series([0, 1] * 500)
@@ -325,7 +544,7 @@ def test_make_folds_deterministic():
         assert np.array_equal(tea, teb)
 ```
 
-- [ ] **Step 2: Run, confirm fail**
+- [ ] **Step 2: Fail**
 
 ```bash
 cd comparison && uv run pytest tests/test_cv.py -v
@@ -347,7 +566,7 @@ def make_folds(y: pd.Series, n_splits: int = 10, seed: int = 42) -> list[tuple[n
     return [(tr, te) for tr, te in skf.split(X_dummy, y)]
 ```
 
-- [ ] **Step 4: Run, confirm pass**
+- [ ] **Step 4: Pass**
 
 ```bash
 cd comparison && uv run pytest tests/test_cv.py -v
@@ -362,7 +581,7 @@ git commit -m "feat(comparison): stratified 10-fold CV with frozen seed"
 
 ---
 
-## Task 4: Core metrics (AUC, Gini, KS, Brier, log-loss)
+## Task 5: Core metrics (AUC, Gini, KS, Brier, log-loss)
 
 **Files:**
 - Create: `comparison/src/metrics.py`
@@ -394,12 +613,12 @@ def test_ks_perfect_separation():
 
 def test_logloss_clipping():
     y = np.array([0, 1])
-    p = np.array([1.0, 0.0])   # would be inf without clipping
+    p = np.array([1.0, 0.0])
     m = compute_all(y, p)
     assert np.isfinite(m["logloss"])
 ```
 
-- [ ] **Step 2: Run, fail**
+- [ ] **Step 2: Fail**
 
 ```bash
 cd comparison && uv run pytest tests/test_metrics.py -v
@@ -409,7 +628,7 @@ cd comparison && uv run pytest tests/test_metrics.py -v
 
 Create `comparison/src/metrics.py`:
 ```python
-"""Discrimination + scoring-rule metrics."""
+"""Discrimination + scoring-rule metrics + paired statistical tests."""
 from __future__ import annotations
 import numpy as np
 from sklearn.metrics import roc_auc_score, roc_curve, brier_score_loss, log_loss
@@ -433,7 +652,7 @@ def compute_all(y_true: np.ndarray, y_prob: np.ndarray) -> dict:
     }
 ```
 
-- [ ] **Step 4: Run, pass**
+- [ ] **Step 4: Pass**
 
 ```bash
 cd comparison && uv run pytest tests/test_metrics.py -v
@@ -448,7 +667,7 @@ git commit -m "feat(comparison): core discrimination metrics with clipping"
 
 ---
 
-## Task 5: DeLong paired test for AUC
+## Task 6: DeLong paired test for AUC
 
 **Files:**
 - Modify: `comparison/src/metrics.py` (append DeLong functions)
@@ -471,27 +690,25 @@ def test_delong_identical_returns_high_p():
 def test_delong_better_model_significant():
     rng = np.random.default_rng(2)
     y = rng.integers(0, 2, 500)
-    # bad model = noise; good model = y + noise (perfectly informative)
     p_bad = rng.random(500)
     p_good = y + rng.normal(0, 0.3, 500)
     z, pval = delong_test(y, p_bad, p_good)
     assert pval < 0.01
 ```
 
-- [ ] **Step 2: Run, fail**
+- [ ] **Step 2: Fail**
 
 ```bash
 cd comparison && uv run pytest tests/test_metrics.py::test_delong_identical_returns_high_p -v
 ```
 
-- [ ] **Step 3: Implement DeLong (Sun & Xu 2014 algorithm)**
+- [ ] **Step 3: Implement DeLong (Sun & Xu 2014)**
 
 Append to `comparison/src/metrics.py`:
 ```python
 from scipy import stats
 
 def _compute_midrank(x: np.ndarray) -> np.ndarray:
-    """Mid-rank, ties broken by averaging."""
     J = np.argsort(x)
     Z = x[J]
     N = len(x)
@@ -501,14 +718,13 @@ def _compute_midrank(x: np.ndarray) -> np.ndarray:
         j = i
         while j < N and Z[j] == Z[i]:
             j += 1
-        T[i:j] = 0.5 * (i + j - 1) + 1   # 1-indexed mid-rank
+        T[i:j] = 0.5 * (i + j - 1) + 1
         i = j
     T2 = np.empty(N, dtype=float)
     T2[J] = T
     return T2
 
 def _fast_delong(predictions_sorted_transposed: np.ndarray, label_1_count: int):
-    """Sun & Xu 2014 fast DeLong implementation. Predictions shape (k, n), positives first."""
     m = label_1_count
     n = predictions_sorted_transposed.shape[1] - m
     k = predictions_sorted_transposed.shape[0]
@@ -534,11 +750,10 @@ def _fast_delong(predictions_sorted_transposed: np.ndarray, label_1_count: int):
 
 def delong_test(y_true: np.ndarray, prob_a: np.ndarray, prob_b: np.ndarray) -> tuple[float, float]:
     """Two-sided paired DeLong test. Returns (z_statistic, p_value).
-
     z > 0 means model A has higher AUC than B.
     """
     y_true = np.asarray(y_true).astype(int)
-    order = (-y_true).argsort(kind="stable")   # positives first
+    order = (-y_true).argsort(kind="stable")
     y_sorted = y_true[order]
     label_1_count = int(y_sorted.sum())
     preds = np.vstack([np.asarray(prob_a)[order], np.asarray(prob_b)[order]])
@@ -551,12 +766,11 @@ def delong_test(y_true: np.ndarray, prob_a: np.ndarray, prob_b: np.ndarray) -> t
     return float(z), float(pval)
 ```
 
-- [ ] **Step 4: Run, pass**
+- [ ] **Step 4: Pass**
 
 ```bash
 cd comparison && uv run pytest tests/test_metrics.py -v
 ```
-Expected: all metrics tests pass (5 total now).
 
 - [ ] **Step 5: Commit**
 
@@ -567,7 +781,7 @@ git commit -m "feat(comparison): DeLong paired AUC test (Sun & Xu 2014)"
 
 ---
 
-## Task 6: Wilcoxon + Bonferroni helpers
+## Task 7: Wilcoxon + Bonferroni helpers
 
 **Files:**
 - Modify: `comparison/src/metrics.py`
@@ -582,7 +796,7 @@ from src.metrics import wilcoxon_paired, bonferroni
 def test_wilcoxon_paired_returns_pval():
     np.random.seed(0)
     a = np.random.random(10)
-    b = a + 0.05   # b consistently higher
+    b = a + 0.05
     stat, p = wilcoxon_paired(a, b)
     assert p < 0.05
 
@@ -591,7 +805,7 @@ def test_bonferroni_clips_to_one():
     assert bonferroni(0.01, 7) == 0.07
 ```
 
-- [ ] **Step 2: Run, fail**
+- [ ] **Step 2: Fail**
 
 ```bash
 cd comparison && uv run pytest tests/test_metrics.py -k "wilcoxon or bonferroni" -v
@@ -610,7 +824,7 @@ def bonferroni(pval: float, n_comparisons: int) -> float:
     return float(min(1.0, pval * n_comparisons))
 ```
 
-- [ ] **Step 4: Run, pass**
+- [ ] **Step 4: Pass**
 
 ```bash
 cd comparison && uv run pytest tests/test_metrics.py -v
@@ -625,7 +839,7 @@ git commit -m "feat(comparison): Wilcoxon paired test + Bonferroni helper"
 
 ---
 
-## Task 7: PDModel protocol
+## Task 8: PDModel protocol
 
 **Files:**
 - Create: `comparison/src/models/base.py`
@@ -654,7 +868,7 @@ def test_dummy_satisfies_protocol():
     assert np.all((out >= 0) & (out <= 1))
 ```
 
-- [ ] **Step 2: Run, fail**
+- [ ] **Step 2: Fail**
 
 ```bash
 cd comparison && uv run pytest tests/test_base.py -v
@@ -670,7 +884,11 @@ import numpy as np
 import pandas as pd
 
 class PDModel(Protocol):
-    """Uniform interface every model wrapper implements."""
+    """Uniform interface every model wrapper implements.
+
+    The runner applies fold-safe preprocessing BEFORE calling fit_predict, so
+    X_train and X_test arrive already capped. Wrappers should not re-cap.
+    """
     name: str
     requires_string_labels: bool
 
@@ -686,7 +904,7 @@ class PDModel(Protocol):
         ...
 ```
 
-- [ ] **Step 4: Run, pass**
+- [ ] **Step 4: Pass**
 
 ```bash
 cd comparison && uv run pytest tests/test_base.py -v
@@ -701,56 +919,104 @@ git commit -m "feat(comparison): PDModel protocol"
 
 ---
 
-## Task 8: WoE-logit champion wrapper (faithful to report)
+## Task 9: WoE-logit champion wrapper (coefficient-faithful to report)
 
 **Files:**
 - Create: `comparison/src/models/woe_logit.py`
 - Create: `comparison/tests/test_woe_logit.py`
 
-The wrapper fits OptimalBinning per fold using `dtype`/`monotonicity`/`special_codes` from `types_meta`, then sklearn LogisticRegression on the WoE-transformed 8 champion variables.
+Spec §8 requires: `penalty=None` LR, explicit monotonic trends per variable, CP→MIP solver fallback, coefficient-level sanity vs `model_params.json` within ±0.05.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
 Create `comparison/tests/test_woe_logit.py`:
 ```python
 from pathlib import Path
+import json
 import numpy as np
 import pandas as pd
+import pytest
 from src.data_loader import load
-from src.models.woe_logit import WoELogitChampion, CHAMPION_VARS
+from src.preprocessing import fold_safe_iqr_cap
+from src.models.woe_logit import WoELogitChampion, CHAMPION_VARS, MONOTONIC_TRENDS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+MODEL_PARAMS = REPO_ROOT / "runs" / "2026-03-17_071354" / "pipeline" / "model_params.json"
 
 def test_champion_vars_count():
     assert len(CHAMPION_VARS) == 8
 
+def test_monotonic_trends_defined_for_all_vars():
+    assert set(MONOTONIC_TRENDS.keys()) == set(CHAMPION_VARS)
+
 def test_fit_predict_shape_and_range():
     X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
     model = WoELogitChampion()
-    # Use first 800 train, last 200 test
-    proba = model.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta, seed=42)
+    proba = model.fit_predict(X_tr, y.iloc[:800], X_te, meta, seed=42)
     assert proba.shape == (200,)
     assert np.all((proba >= 0) & (proba <= 1))
 
-def test_full_sample_refit_matches_report_auc():
-    """Sanity: full-sample fit must reproduce the report's in-sample AUC ~0.81."""
-    from sklearn.metrics import roc_auc_score
-    X, y, meta = load(repo_root=REPO_ROOT)
-    model = WoELogitChampion()
-    proba = model.fit_predict(X, y, X, meta, seed=42)
-    auc = roc_auc_score(y, proba)
-    # Report says 0.8109; allow tolerance for binning library version differences
-    assert 0.80 < auc < 0.82, f"got AUC={auc:.4f}, expected ~0.81"
-
 def test_determinism():
     X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
     m = WoELogitChampion()
-    a = m.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta, seed=42)
-    b = m.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta, seed=42)
+    a = m.fit_predict(X_tr, y.iloc[:800], X_te, meta, seed=42)
+    b = m.fit_predict(X_tr, y.iloc[:800], X_te, meta, seed=42)
     np.testing.assert_allclose(a, b)
+
+def test_special_codes_isolated():
+    """After fitting, the three special-coded variables must have a dedicated
+    bin for their special value. Verifies _parse_special_codes wiring is wired
+    through to OptimalBinning."""
+    X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, _, _ = fold_safe_iqr_cap(X, X.iloc[:1], meta)
+    m = WoELogitChampion()
+    m.fit_predict(X_tr, y, X_tr.iloc[:1], meta, seed=42)
+    # After fit_predict, binners are stored on the instance
+    for col, special in [("Account Balance", 4),
+                         ("Value Savings/Stocks", 5),
+                         ("Most valuable available asset", 4)]:
+        binner = m._binners[col]
+        # OptimalBinning exposes the special bin via the splits object
+        # The simplest check: there exists a bin label corresponding to the special code
+        bin_table = binner.binning_table.build()
+        assert any("Special" in str(row) for row in bin_table["Bin"].astype(str)), \
+            f"{col} missing Special bin (special_code={special})"
+
+def test_full_sample_refit_matches_report_coefficients():
+    """GATING TEST: every coefficient (intercept + 8 slopes) must be within
+    absolute tolerance 0.05 of the report's model_params.json."""
+    if not MODEL_PARAMS.exists():
+        pytest.skip(f"missing {MODEL_PARAMS}")
+    report = json.loads(MODEL_PARAMS.read_text())
+    # The report's model_params.json should contain a 'coefficients' or similar key.
+    # If the structure differs, adapt this loader. Expected schema:
+    #   {"intercept": -0.8475, "coefficients": {"Account Balance": -0.7848, ...}}
+    expected_intercept = report.get("intercept")
+    expected_coefs = report.get("coefficients") or report.get("coef")
+    if expected_intercept is None or expected_coefs is None:
+        pytest.skip("model_params.json does not contain intercept/coefficients in expected schema")
+
+    X, y, meta = load(repo_root=REPO_ROOT)
+    # Apply the same fold-safe cap recipe to the full sample (treating the full
+    # 1000 rows as if they were the training fold) to mirror what the runner does.
+    X_capped, _, _ = fold_safe_iqr_cap(X, X.iloc[:1], meta)
+    m = WoELogitChampion()
+    m.fit_predict(X_capped, y, X_capped.iloc[:1], meta, seed=42)
+
+    actual_intercept = float(m._lr.intercept_[0])
+    actual_coefs = dict(zip(CHAMPION_VARS, m._lr.coef_[0].tolist()))
+
+    assert abs(actual_intercept - expected_intercept) <= 0.05, \
+        f"intercept drift: actual={actual_intercept:.4f}, expected={expected_intercept:.4f}"
+    for col in CHAMPION_VARS:
+        diff = abs(actual_coefs[col] - expected_coefs[col])
+        assert diff <= 0.05, \
+            f"coef drift on {col}: actual={actual_coefs[col]:.4f}, expected={expected_coefs[col]:.4f}, diff={diff:.4f}"
 ```
 
-- [ ] **Step 2: Run, fail**
+- [ ] **Step 2: Fail**
 
 ```bash
 cd comparison && uv run pytest tests/test_woe_logit.py -v
@@ -760,14 +1026,20 @@ cd comparison && uv run pytest tests/test_woe_logit.py -v
 
 Create `comparison/src/models/woe_logit.py`:
 ```python
-"""WoE + Logit champion model — faithful to pd-autopilot stage 04a (MIV)."""
+"""WoE + unregularised Logit champion — faithful to pd-autopilot stage 04a (MIV).
+
+Spec §8 requirements honoured here:
+- penalty=None (matches report's statsmodels-style logit)
+- Explicit monotonic trends per variable (no "auto")
+- CP solver with try/except fallback to MIP
+- 8 champion variables fixed at the class level
+"""
 from __future__ import annotations
 import numpy as np
 import pandas as pd
 from optbinning import OptimalBinning
 from sklearn.linear_model import LogisticRegression
 
-# The 8 variables the report's MIV champion selected.
 CHAMPION_VARS = [
     "Account Balance",
     "Payment Status of Previous Credit",
@@ -779,27 +1051,37 @@ CHAMPION_VARS = [
     "Age (years)",
 ]
 
-def _monotonic_trend(monotonicity_flag: str) -> str | None:
-    """variable_types.csv encodes 'yes' (use auto) or 'no' (none). pdtoolkit's
-    OptimalBinning accepts 'auto' / 'ascending' / 'descending' / None."""
-    if isinstance(monotonicity_flag, str) and monotonicity_flag.strip().lower() == "yes":
-        return "auto"
-    return None
+# Hard-coded from report stage 03. None = no monotonicity (nominal).
+MONOTONIC_TRENDS: dict[str, str | None] = {
+    "Account Balance":                   "descending",
+    "Payment Status of Previous Credit": None,
+    "Duration of Credit (month)":        "ascending",
+    "Value Savings/Stocks":              "descending",
+    "Purpose":                           None,
+    "Credit Amount":                     "ascending",
+    "Most valuable available asset":     "ascending",
+    "Age (years)":                       "descending",
+}
+
+def _fit_one_binning(col: str, X_tr: pd.DataFrame, y_tr: pd.Series, meta: dict) -> OptimalBinning:
+    info = meta[col]
+    common = dict(
+        name=col,
+        dtype=info["dtype"],
+        monotonic_trend=MONOTONIC_TRENDS[col],
+        special_codes=info["special_codes"] or None,
+    )
+    # Try CP first; on failure (some ordinal-ascending edge cases) fall back to MIP.
+    try:
+        ob = OptimalBinning(solver="cp", **common)
+        ob.fit(X_tr[col].values, y_tr.values)
+    except Exception:
+        ob = OptimalBinning(solver="mip", **common)
+        ob.fit(X_tr[col].values, y_tr.values)
+    return ob
 
 def _fit_binning(X_tr: pd.DataFrame, y_tr: pd.Series, meta: dict) -> dict[str, OptimalBinning]:
-    binners: dict[str, OptimalBinning] = {}
-    for col in CHAMPION_VARS:
-        info = meta[col]
-        ob = OptimalBinning(
-            name=col,
-            dtype=info["dtype"],
-            monotonic_trend=_monotonic_trend(info["monotonicity"]),
-            special_codes=info["special_codes"] or None,
-            solver="cp",
-        )
-        ob.fit(X_tr[col].values, y_tr.values)
-        binners[col] = ob
-    return binners
+    return {col: _fit_one_binning(col, X_tr, y_tr, meta) for col in CHAMPION_VARS}
 
 def _transform(binners: dict[str, OptimalBinning], X: pd.DataFrame) -> np.ndarray:
     cols = [binners[c].transform(X[c].values, metric="woe") for c in CHAMPION_VARS]
@@ -810,53 +1092,66 @@ class WoELogitChampion:
     requires_string_labels = False
 
     def fit_predict(self, X_train, y_train, X_test, types_meta, seed: int = 42) -> np.ndarray:
-        binners = _fit_binning(X_train, y_train, types_meta)
-        Z_tr = _transform(binners, X_train)
-        Z_te = _transform(binners, X_test)
-        lr = LogisticRegression(solver="lbfgs", max_iter=1000, random_state=seed)
-        lr.fit(Z_tr, y_train.values)
-        return lr.predict_proba(Z_te)[:, 1]
+        self._binners = _fit_binning(X_train, y_train, types_meta)
+        Z_tr = _transform(self._binners, X_train)
+        Z_te = _transform(self._binners, X_test)
+        # penalty=None ⇒ unregularised, matches the report's coefficients
+        self._lr = LogisticRegression(penalty=None, solver="lbfgs", max_iter=1000, random_state=seed)
+        self._lr.fit(Z_tr, y_train.values)
+        return self._lr.predict_proba(Z_te)[:, 1]
 ```
 
-- [ ] **Step 4: Run, pass**
+- [ ] **Step 4: Run and pass**
 
 ```bash
 cd comparison && uv run pytest tests/test_woe_logit.py -v
 ```
-If `test_full_sample_refit_matches_report_auc` fails, do NOT proceed — debug the binning setup (special_codes, monotonic_trend, dtype) against the report's stage_03.md before continuing.
+
+If `test_full_sample_refit_matches_report_coefficients` fails or skips because `model_params.json` does not store coefficients in the expected schema: **stop**, open `runs/2026-03-17_071354/pipeline/model_params.json`, identify the actual key structure, and adapt the test's loader to match. Then re-run. Do NOT proceed to TFM tasks until this gating test passes — it's the contract that proves the incumbent is faithful.
+
+If `test_special_codes_isolated` fails: the `_parse_special_codes` fix from Task 2 didn't propagate; debug there first.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd .. && git add comparison/src/models/woe_logit.py comparison/tests/test_woe_logit.py
-git commit -m "feat(comparison): WoE-logit champion wrapper with report-fidelity sanity test"
+git commit -m "feat(comparison): WoE-logit champion (penalty=None, explicit trends, coef sanity)"
 ```
 
 ---
 
-## Task 9: Plain logistic regression wrapper
+## Task 10: Plain logistic regression wrapper
 
 **Files:**
 - Create: `comparison/src/models/logit.py`
 - Create: `comparison/tests/test_logit.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Failing test**
 
 Create `comparison/tests/test_logit.py`:
 ```python
 from pathlib import Path
 import numpy as np
 from src.data_loader import load
+from src.preprocessing import fold_safe_iqr_cap
 from src.models.logit import PlainLogit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def test_plain_logit_runs():
     X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
     m = PlainLogit()
-    p = m.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta)
+    p = m.fit_predict(X_tr, y.iloc[:800], X_te, meta)
     assert p.shape == (200,)
     assert np.all((p >= 0) & (p <= 1))
+
+def test_plain_logit_accepts_tuned_params():
+    X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
+    m = PlainLogit(params={"C": 0.1})
+    p = m.fit_predict(X_tr, y.iloc[:800], X_te, meta)
+    assert p.shape == (200,)
 ```
 
 - [ ] **Step 2: Fail**
@@ -882,6 +1177,9 @@ class PlainLogit:
     name = "logit"
     requires_string_labels = False
 
+    def __init__(self, params: dict | None = None):
+        self.params = params or {}
+
     def fit_predict(self, X_train, y_train, X_test, types_meta, seed: int = 42) -> np.ndarray:
         nominal = [c for c, i in types_meta.items() if i["type"] == "nominal" and c in X_train.columns]
         other = [c for c in X_train.columns if c not in nominal]
@@ -889,8 +1187,9 @@ class PlainLogit:
             ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), nominal),
             ("num", StandardScaler(), other),
         ])
-        pipe = Pipeline([("pre", pre),
-                         ("lr", LogisticRegression(solver="lbfgs", max_iter=2000, random_state=seed))])
+        lr_kwargs = dict(solver="lbfgs", max_iter=2000, random_state=seed)
+        lr_kwargs.update(self.params)
+        pipe = Pipeline([("pre", pre), ("lr", LogisticRegression(**lr_kwargs))])
         pipe.fit(X_train, y_train.values)
         return pipe.predict_proba(X_test)[:, 1]
 ```
@@ -905,12 +1204,12 @@ cd comparison && uv run pytest tests/test_logit.py -v
 
 ```bash
 cd .. && git add comparison/src/models/logit.py comparison/tests/test_logit.py
-git commit -m "feat(comparison): plain logistic regression baseline"
+git commit -m "feat(comparison): plain logistic regression baseline (params-aware)"
 ```
 
 ---
 
-## Task 10: XGBoost wrapper
+## Task 11: XGBoost wrapper
 
 **Files:**
 - Create: `comparison/src/models/xgb.py`
@@ -923,14 +1222,16 @@ Create `comparison/tests/test_xgb.py`:
 from pathlib import Path
 import numpy as np
 from src.data_loader import load
+from src.preprocessing import fold_safe_iqr_cap
 from src.models.xgb import XGBWrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def test_xgb_runs():
     X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
     m = XGBWrapper()
-    p = m.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta)
+    p = m.fit_predict(X_tr, y.iloc[:800], X_te, meta)
     assert p.shape == (200,)
     assert np.all((p >= 0) & (p <= 1))
 ```
@@ -968,7 +1269,6 @@ class XGBWrapper:
     def fit_predict(self, X_train, y_train, X_test, types_meta, seed: int = 42) -> np.ndarray:
         X_tr = self._to_cat(X_train, types_meta)
         X_te = self._to_cat(X_test, types_meta)
-        # Align category levels of test to train
         for c in X_tr.columns:
             if str(X_tr[c].dtype) == "category":
                 X_te[c] = X_te[c].astype(pd.CategoricalDtype(categories=X_tr[c].cat.categories))
@@ -995,12 +1295,12 @@ cd comparison && uv run pytest tests/test_xgb.py -v
 
 ```bash
 cd .. && git add comparison/src/models/xgb.py comparison/tests/test_xgb.py
-git commit -m "feat(comparison): XGBoost wrapper with native categorical handling"
+git commit -m "feat(comparison): XGBoost wrapper (params-aware, native categorical)"
 ```
 
 ---
 
-## Task 11: LightGBM wrapper
+## Task 12: LightGBM wrapper
 
 **Files:**
 - Create: `comparison/src/models/lgbm.py`
@@ -1013,14 +1313,16 @@ Create `comparison/tests/test_lgbm.py`:
 from pathlib import Path
 import numpy as np
 from src.data_loader import load
+from src.preprocessing import fold_safe_iqr_cap
 from src.models.lgbm import LGBMWrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def test_lgbm_runs():
     X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
     m = LGBMWrapper()
-    p = m.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta)
+    p = m.fit_predict(X_tr, y.iloc[:800], X_te, meta)
     assert p.shape == (200,)
     assert np.all((p >= 0) & (p <= 1))
 ```
@@ -1077,12 +1379,12 @@ cd comparison && uv run pytest tests/test_lgbm.py -v
 
 ```bash
 cd .. && git add comparison/src/models/lgbm.py comparison/tests/test_lgbm.py
-git commit -m "feat(comparison): LightGBM wrapper with categorical_feature support"
+git commit -m "feat(comparison): LightGBM wrapper (params-aware, categorical_feature)"
 ```
 
 ---
 
-## Task 12: TabPFN v2 wrapper
+## Task 13: TabPFN v2 wrapper
 
 **Files:**
 - Create: `comparison/src/models/tabpfn.py`
@@ -1093,7 +1395,7 @@ git commit -m "feat(comparison): LightGBM wrapper with categorical_feature suppo
 ```bash
 cd comparison && uv add tabpfn
 ```
-If PyPI install fails, fall back to: `uv add "tabpfn @ git+https://github.com/PriorLabs/TabPFN.git"`.
+Fallback: `uv add "tabpfn @ git+https://github.com/PriorLabs/TabPFN.git"`.
 
 - [ ] **Step 2: Failing test**
 
@@ -1103,6 +1405,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from src.data_loader import load
+from src.preprocessing import fold_safe_iqr_cap
 from src.models.tabpfn import TabPFNWrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1110,19 +1413,30 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.mark.slow
 def test_tabpfn_runs():
     X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
     m = TabPFNWrapper()
-    p = m.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta)
+    p = m.fit_predict(X_tr, y.iloc[:800], X_te, meta)
     assert p.shape == (200,)
     assert np.all((p >= 0) & (p <= 1))
 ```
 
-- [ ] **Step 3: Fail**
+- [ ] **Step 3: Register the `slow` marker**
+
+Edit `comparison/pyproject.toml`, append (create the section if absent):
+```toml
+[tool.pytest.ini_options]
+markers = [
+    "slow: heavy TFM tests; opt in with -m slow",
+]
+```
+
+- [ ] **Step 4: Fail**
 
 ```bash
 cd comparison && uv run pytest tests/test_tabpfn.py -v -m slow
 ```
 
-- [ ] **Step 4: Implement**
+- [ ] **Step 5: Implement**
 
 Create `comparison/src/models/tabpfn.py`:
 ```python
@@ -1160,22 +1474,12 @@ class TabPFNWrapper:
         return clf.predict_proba(X_test.values)[:, 1]
 ```
 
-- [ ] **Step 5: Pass**
+- [ ] **Step 6: Pass**
 
 ```bash
 cd comparison && uv run pytest tests/test_tabpfn.py -v -m slow
 ```
-First run downloads the TabPFN v2 weights from Hugging Face (~100 MB).
-
-- [ ] **Step 6: Register the `slow` marker**
-
-Edit `comparison/pyproject.toml`, append to `[tool.pytest.ini_options]` (create the section if absent):
-```toml
-[tool.pytest.ini_options]
-markers = [
-    "slow: heavy TFM tests; opt in with -m slow",
-]
-```
+First run downloads TabPFN v2 weights from HF (~100 MB).
 
 - [ ] **Step 7: Commit**
 
@@ -1187,7 +1491,7 @@ git commit -m "feat(comparison): TabPFN v2 wrapper (MPS/CUDA/CPU auto-device)"
 
 ---
 
-## Task 13: TabICL wrapper
+## Task 14: TabICL wrapper
 
 **Files:**
 - Create: `comparison/src/models/tabicl.py`
@@ -1198,7 +1502,7 @@ git commit -m "feat(comparison): TabPFN v2 wrapper (MPS/CUDA/CPU auto-device)"
 ```bash
 cd comparison && uv add tabicl
 ```
-If unavailable on PyPI: `uv add "tabicl @ git+https://github.com/soda-inria/tabicl.git"`.
+Fallback: `uv add "tabicl @ git+https://github.com/soda-inria/tabicl.git"`.
 
 - [ ] **Step 2: Failing test**
 
@@ -1208,6 +1512,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from src.data_loader import load
+from src.preprocessing import fold_safe_iqr_cap
 from src.models.tabicl import TabICLWrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1215,8 +1520,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.mark.slow
 def test_tabicl_runs():
     X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
     m = TabICLWrapper()
-    p = m.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta)
+    p = m.fit_predict(X_tr, y.iloc[:800], X_te, meta)
     assert p.shape == (200,)
     assert np.all((p >= 0) & (p <= 1))
 ```
@@ -1247,7 +1553,6 @@ class TabICLWrapper:
                    for c, i in types_meta.items()
                    if i["type"] == "nominal" and c in X_train.columns]
         clf = TabICLClassifier(device=_device(), random_state=seed)
-        # TabICL accepts categorical_features kwarg in fit() on recent versions.
         try:
             clf.fit(X_train.values, y_train.values, categorical_features=cat_idx or None)
         except TypeError:
@@ -1271,7 +1576,7 @@ git commit -m "feat(comparison): TabICL wrapper"
 
 ---
 
-## Task 14: TabDPT wrapper
+## Task 15: TabDPT wrapper
 
 **Files:**
 - Create: `comparison/src/models/tabdpt.py`
@@ -1292,6 +1597,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from src.data_loader import load
+from src.preprocessing import fold_safe_iqr_cap
 from src.models.tabdpt import TabDPTWrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1299,8 +1605,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.mark.slow
 def test_tabdpt_runs():
     X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
     m = TabDPTWrapper()
-    p = m.fit_predict(X.iloc[:800], y.iloc[:800], X.iloc[800:], meta)
+    p = m.fit_predict(X_tr, y.iloc[:800], X_te, meta)
     assert p.shape == (200,)
     assert np.all((p >= 0) & (p <= 1))
 ```
@@ -1330,7 +1637,6 @@ class TabDPTWrapper:
         clf = TabDPTClassifier(device=_device())
         clf.fit(X_train.values, y_train.values)
         proba = clf.predict_proba(X_test.values)
-        # Some versions return (n, 2), others (n,) for binary; normalise:
         if proba.ndim == 2:
             return proba[:, 1]
         return proba
@@ -1352,7 +1658,7 @@ git commit -m "feat(comparison): TabDPT wrapper"
 
 ---
 
-## Task 15: CARTE wrapper (string-decoded)
+## Task 16: CARTE wrapper (string-decoded)
 
 **Files:**
 - Create: `comparison/src/models/carte.py`
@@ -1363,7 +1669,7 @@ git commit -m "feat(comparison): TabDPT wrapper"
 ```bash
 cd comparison && uv add carte-ai torch
 ```
-PyG is a transitive dep of carte-ai; if `uv add carte-ai` fails on missing PyG wheels, install torch first then: `uv add "carte-ai @ git+https://github.com/soda-inria/carte.git"`.
+Fallback: `uv add "carte-ai @ git+https://github.com/soda-inria/carte.git"`.
 
 - [ ] **Step 2: Failing test**
 
@@ -1373,6 +1679,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from src.data_loader import load, carte_decode
+from src.preprocessing import fold_safe_iqr_cap
 from src.models.carte import CARTEWrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1384,9 +1691,12 @@ def test_carte_requires_string_labels_flag():
 @pytest.mark.slow
 def test_carte_runs_on_decoded_input():
     X, y, meta = load(repo_root=REPO_ROOT)
-    X_str = carte_decode(X, meta)
+    # Apply fold-safe cap THEN string-decode (decode is a no-op on continuous cols)
+    X_tr, X_te, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
+    X_tr_str = carte_decode(X_tr, meta)
+    X_te_str = carte_decode(X_te, meta)
     m = CARTEWrapper()
-    p = m.fit_predict(X_str.iloc[:800], y.iloc[:800], X_str.iloc[800:], meta)
+    p = m.fit_predict(X_tr_str, y.iloc[:800], X_te_str, meta)
     assert p.shape == (200,)
     assert np.all((p >= 0) & (p <= 1))
 ```
@@ -1411,8 +1721,8 @@ class CARTEWrapper:
     requires_string_labels = True
 
     def fit_predict(self, X_train, y_train, X_test, types_meta, seed: int = 42) -> np.ndarray:
-        # carte-ai's public API as of 2026:
-        from carte_ai import CARTEClassifier   # PyPI package name is carte-ai → module carte_ai
+        # PyPI package name is carte-ai → module carte_ai
+        from carte_ai import CARTEClassifier
         clf = CARTEClassifier(random_state=seed)
         clf.fit(X_train, y_train.values)
         proba = clf.predict_proba(X_test)
@@ -1420,7 +1730,7 @@ class CARTEWrapper:
             return proba[:, 1]
         return proba
 ```
-Note: if the import path differs (e.g. `from carte import CARTEClassifier`), adjust to match the installed package's `__init__.py`. Check with `uv run python -c "import carte_ai; print(dir(carte_ai))"`.
+If the import path differs, check with `uv run python -c "import carte_ai; print(dir(carte_ai))"` and adjust.
 
 - [ ] **Step 5: Pass**
 
@@ -1438,11 +1748,16 @@ git commit -m "feat(comparison): CARTE wrapper with string-decoded inputs"
 
 ---
 
-## Task 16: Runner (per-fold CSV writer)
+## Task 17: Runner (fold-safe + predictions parquet from v1)
 
 **Files:**
 - Create: `comparison/src/runner.py`
 - Create: `comparison/tests/test_runner.py`
+
+This is the heart of the orchestration. The outer loop is **folds-first, models-second** so:
+1. `fold_safe_iqr_cap` runs once per fold, not once per (fold × model).
+2. In Pass 2, `tune_classicals_for_fold` is called once per outer fold (yielding params shared by all three classicals on that fold).
+3. Predictions parquet is written from this very first version — no retrofit.
 
 - [ ] **Step 1: Failing test**
 
@@ -1453,29 +1768,28 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from src.runner import run_one_fold, append_row
+from src.runner import run_one_fold_one_model, append_row
+
+class _DummyModel:
+    name = "stub"
+    requires_string_labels = False
+    def fit_predict(self, X_tr, y_tr, X_te, meta, seed=42):
+        return np.full(len(X_te), 0.5)
 
 def test_append_row_creates_header(tmp_path):
     path = tmp_path / "out.csv"
     append_row(path, {"model": "x", "fold": 0, "auc": 0.7})
     append_row(path, {"model": "x", "fold": 1, "auc": 0.8})
-    with open(path) as f:
-        rows = list(csv.DictReader(f))
+    rows = list(csv.DictReader(open(path)))
     assert len(rows) == 2
-    assert rows[0]["auc"] == "0.7"
 
-def test_run_one_fold_returns_metrics():
-    class _M:
-        name = "stub"
-        requires_string_labels = False
-        def fit_predict(self, X_tr, y_tr, X_te, meta, seed=42):
-            return np.full(len(X_te), 0.5)
+def test_run_one_fold_one_model_returns_metrics_and_proba():
     X = pd.DataFrame({"a": range(100)})
     y = pd.Series([0, 1] * 50)
-    out = run_one_fold(_M(), X, y, np.arange(80), np.arange(80, 100), meta={})
+    out, proba = run_one_fold_one_model(_DummyModel(), X, y, np.arange(80), np.arange(80, 100), meta={})
     assert "auc" in out and "logloss" in out
     assert out["model"] == "stub"
-    assert out["fold_idx"] == -1  # unset, runner passes fold_idx separately
+    assert proba.shape == (20,)
 ```
 
 - [ ] **Step 2: Fail**
@@ -1488,7 +1802,15 @@ cd comparison && uv run pytest tests/test_runner.py -v
 
 Create `comparison/src/runner.py`:
 ```python
-"""Orchestration: loop over (model, fold), write per-fold CSV row-by-row."""
+"""Orchestration: outer loop over folds, inner loop over models.
+
+Per-fold pipeline (in order):
+  1. Slice X, y by (train_idx, test_idx) from RAW loans.csv.
+  2. Apply fold_safe_iqr_cap.
+  3. (Pass 2 only) Run tune_classicals_for_fold on the capped training fold.
+  4. For each model: invoke fit_predict, append metrics row to CSV,
+     append predictions to parquet.
+"""
 from __future__ import annotations
 import argparse
 import csv
@@ -1499,6 +1821,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from src.data_loader import load, carte_decode
+from src.preprocessing import fold_safe_iqr_cap
 from src.cv import make_folds
 from src.metrics import compute_all
 
@@ -1514,22 +1837,22 @@ def append_row(path: Path, row: dict) -> None:
             w.writeheader()
         w.writerow(row)
 
-def run_one_fold(model, X, y, train_idx, test_idx, meta) -> dict:
-    if getattr(model, "requires_string_labels", False):
-        X_tr_in = X.iloc[train_idx]
-        X_te_in = X.iloc[test_idx]
-    else:
-        X_tr_in = X.iloc[train_idx]
-        X_te_in = X.iloc[test_idx]
+def run_one_fold_one_model(model, X, y, train_idx, test_idx, meta) -> tuple[dict, np.ndarray]:
     t0 = time.perf_counter()
-    proba = model.fit_predict(X_tr_in, y.iloc[train_idx], X_te_in, meta)
+    proba = model.fit_predict(X.iloc[train_idx], y.iloc[train_idx], X.iloc[test_idx], meta)
     runtime = time.perf_counter() - t0
     m = compute_all(y.iloc[test_idx].values, proba)
     m.update(model=model.name, n_train=len(train_idx), n_test=len(test_idx),
              runtime_s=runtime, fold_idx=-1)
-    return m
+    return m, proba
 
-def _build_models(pass_name: str, tuned_params: dict | None = None):
+def _build_models_for_fold(pass_name: str, tuned_params: dict | None) -> list:
+    """Construct one instance per model for this outer fold.
+
+    For Pass 1: all models with defaults.
+    For Pass 2: classicals use tuned_params from this fold's nested study;
+                woe_logit + 4 TFMs unchanged (their pass-1 rows will be reused).
+    """
     from src.models.woe_logit import WoELogitChampion
     from src.models.logit import PlainLogit
     from src.models.xgb import XGBWrapper
@@ -1539,46 +1862,106 @@ def _build_models(pass_name: str, tuned_params: dict | None = None):
     from src.models.tabdpt import TabDPTWrapper
     from src.models.carte import CARTEWrapper
 
-    tuned_params = tuned_params or {}
+    tp = tuned_params or {}
     return [
         WoELogitChampion(),
-        PlainLogit(),
-        XGBWrapper(params=tuned_params.get("xgb")),
-        LGBMWrapper(params=tuned_params.get("lgbm")),
+        PlainLogit(params=tp.get("logit")),
+        XGBWrapper(params=tp.get("xgb")),
+        LGBMWrapper(params=tp.get("lgbm")),
         TabPFNWrapper(),
         TabICLWrapper(),
         TabDPTWrapper(),
         CARTEWrapper(),
     ]
 
-def run_pass(pass_name: str, n_splits: int = 10, seed: int = 42, tuned_params: dict | None = None):
-    """Execute all models on all folds, writing per_fold_<pass_name>.csv."""
+# Which models are unchanged between Pass 1 and Pass 2 → their pass-2 rows are
+# copied from the pass-1 outputs rather than re-computed.
+COPY_FROM_PASS1 = {"woe_logit", "tabpfn_v2", "tabicl", "tabdpt", "carte"}
+
+def run_pass(pass_name: str, n_splits: int = 10, seed: int = 42) -> None:
     X, y, meta = load(REPO_ROOT)
     X_carte = carte_decode(X, meta)
     folds = make_folds(y, n_splits=n_splits, seed=seed)
-    out_path = RESULTS_DIR / f"per_fold_{pass_name}.csv"
-    if out_path.exists():
-        out_path.unlink()
-    models = _build_models(pass_name, tuned_params)
-    for model in models:
-        X_use = X_carte if getattr(model, "requires_string_labels", False) else X
-        for fold_i, (tr, te) in enumerate(tqdm(folds, desc=model.name)):
-            row = run_one_fold(model, X_use, y, tr, te, meta)
+
+    out_csv = RESULTS_DIR / f"per_fold_{pass_name}.csv"
+    out_parquet = RESULTS_DIR / f"predictions_{pass_name}.parquet"
+    for p in (out_csv, out_parquet):
+        if p.exists():
+            p.unlink()
+
+    pass1_preds = None
+    pass1_metrics = None
+    if pass_name == "tuned":
+        # Reuse pass-1 outputs for the unchanged models
+        p1_parquet = RESULTS_DIR / "predictions_defaults.parquet"
+        p1_csv = RESULTS_DIR / "per_fold_defaults.csv"
+        if not (p1_parquet.exists() and p1_csv.exists()):
+            raise RuntimeError("Pass 2 requires Pass 1 outputs. Run --pass defaults first.")
+        pass1_preds = pd.read_parquet(p1_parquet)
+        pass1_metrics = pd.read_csv(p1_csv)
+
+    all_preds: list[pd.DataFrame] = []
+
+    for fold_i, (tr, te) in enumerate(folds):
+        # Step 1+2: fold-safe preprocessing
+        X_tr_raw, X_te_raw = X.iloc[tr], X.iloc[te]
+        X_tr, X_te, caps = fold_safe_iqr_cap(X_tr_raw, X_te_raw, meta)
+        # CARTE inputs: cap (numeric only) then string-decode
+        X_tr_carte = carte_decode(X_tr, meta)
+        X_te_carte = carte_decode(X_te, meta)
+
+        # Step 3: tuning per outer fold (Pass 2 only)
+        tuned_params = None
+        if pass_name == "tuned":
+            from src.tuning import tune_classicals_for_fold
+            tuned_params = tune_classicals_for_fold(X_tr, y.iloc[tr], meta, seed=seed)
+
+        # Step 4: per-model loop
+        models = _build_models_for_fold(pass_name, tuned_params)
+        for model in tqdm(models, desc=f"fold {fold_i+1}/{n_splits}", leave=False):
+            # Reuse pass-1 output for unchanged models
+            if pass_name == "tuned" and model.name in COPY_FROM_PASS1:
+                row = pass1_metrics[(pass1_metrics["model"] == model.name) &
+                                    (pass1_metrics["fold_idx"] == fold_i)].iloc[0].to_dict()
+                row["pass"] = "tuned"
+                append_row(out_csv, row)
+                copy_preds = pass1_preds[(pass1_preds["model"] == model.name) &
+                                         (pass1_preds["fold_idx"] == fold_i)].copy()
+                all_preds.append(copy_preds)
+                continue
+
+            # Choose feature view (CARTE wants strings)
+            if getattr(model, "requires_string_labels", False):
+                X_tr_use, X_te_use = X_tr_carte, X_te_carte
+            else:
+                X_tr_use, X_te_use = X_tr, X_te
+
+            row, proba = run_one_fold_one_model(
+                model, pd.concat([X_tr_use, X_te_use]), y, np.arange(len(X_tr_use)),
+                np.arange(len(X_tr_use), len(X_tr_use) + len(X_te_use)), meta,
+            )
             row["fold_idx"] = fold_i
             row["pass"] = pass_name
-            append_row(out_path, row)
-    print(f"Wrote {out_path}")
+            append_row(out_csv, row)
+
+            all_preds.append(pd.DataFrame({
+                "model": model.name,
+                "fold_idx": fold_i,
+                "test_idx": te,
+                "y": y.iloc[te].values,
+                "proba": proba,
+            }))
+
+    # Write predictions parquet once at the end (single I/O)
+    pd.concat(all_preds, ignore_index=True).to_parquet(out_parquet, index=False)
+    print(f"Wrote {out_csv}")
+    print(f"Wrote {out_parquet}")
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--pass", dest="pass_name", choices=["defaults", "tuned"], required=True)
     args = p.parse_args()
-    if args.pass_name == "defaults":
-        run_pass("defaults")
-    else:
-        from src.tuning import tune_all_classicals
-        tuned = tune_all_classicals(seed=42)
-        run_pass("tuned", tuned_params=tuned)
+    run_pass(args.pass_name)
 
 if __name__ == "__main__":
     main()
@@ -1594,84 +1977,103 @@ cd comparison && uv run pytest tests/test_runner.py -v
 
 ```bash
 cd .. && git add comparison/src/runner.py comparison/tests/test_runner.py
-git commit -m "feat(comparison): runner with per-fold CSV writer"
+git commit -m "feat(comparison): runner with fold-safe preprocessing + predictions parquet"
 ```
 
 ---
 
-## Task 17: Optuna tuning for classicals (pass 2)
+## Task 18: Per-fold nested Optuna tuning (classicals)
 
 **Files:**
 - Create: `comparison/src/tuning.py`
 - Create: `comparison/tests/test_tuning.py`
+
+Spec §4: 10 outer folds × 3 classicals × 50 trials × inner 5-fold CV. Critically, `tune_classicals_for_fold` receives **only** the outer-training fold — never the full dataset.
 
 - [ ] **Step 1: Failing test**
 
 Create `comparison/tests/test_tuning.py`:
 ```python
 from pathlib import Path
-from src.tuning import tune_xgb, tune_lgbm
+import numpy as np
+import pandas as pd
+import pytest
+from src.data_loader import load
+from src.preprocessing import fold_safe_iqr_cap
+from src.tuning import tune_classicals_for_fold
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-def test_tune_xgb_returns_params():
-    params = tune_xgb(n_trials=5, seed=42)   # small for test speed
-    assert "n_estimators" in params or "max_depth" in params
+@pytest.mark.slow
+def test_returns_three_classical_params():
+    X, y, meta = load(repo_root=REPO_ROOT)
+    X_tr, _, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
+    params = tune_classicals_for_fold(X_tr, y.iloc[:800], meta, seed=42, n_trials=3)
+    assert set(params.keys()) == {"xgb", "lgbm", "logit"}
+    for v in params.values():
+        assert isinstance(v, dict) and len(v) > 0
 
-def test_tune_lgbm_returns_params():
-    params = tune_lgbm(n_trials=5, seed=42)
-    assert isinstance(params, dict) and len(params) > 0
+def test_signature_only_consumes_train_rows():
+    """The function MUST NOT accept full-dataset access. This is the
+    no-leakage guard: if anyone refactors to add an `X_full` param later,
+    this test will fail."""
+    import inspect
+    sig = inspect.signature(tune_classicals_for_fold)
+    params = list(sig.parameters.keys())
+    # Allowed params only — adjust this list if you add seed / n_trials etc.
+    allowed = {"X_train_outer", "y_train_outer", "types_meta", "seed", "n_trials"}
+    assert set(params).issubset(allowed), \
+        f"tune_classicals_for_fold must not accept full-dataset args; got {params}"
 ```
 
 - [ ] **Step 2: Fail**
 
 ```bash
-cd comparison && uv run pytest tests/test_tuning.py -v
+cd comparison && uv run pytest tests/test_tuning.py -v -m slow
+cd comparison && uv run pytest tests/test_tuning.py::test_signature_only_consumes_train_rows -v
 ```
 
 - [ ] **Step 3: Implement**
 
 Create `comparison/src/tuning.py`:
 ```python
-"""Optuna nested CV tuning for the classical baselines (pass 2 only)."""
+"""Per-outer-fold nested Optuna tuning for the classical baselines.
+
+Called by the runner ONCE per outer fold (Pass 2). Receives ONLY the outer-
+training rows — the function signature itself is checked by a leakage test.
+"""
 from __future__ import annotations
-from pathlib import Path
 import numpy as np
 import optuna
+import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 
-from src.data_loader import load
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-N_TRIALS = 50
+N_TRIALS_DEFAULT = 50
 INNER_FOLDS = 5
 
-def _inner_cv_score(make_clf, X, y, seed: int) -> float:
+# Silence Optuna's per-trial chatter for cleaner CV logs
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+def _inner_cv_score(make_clf_and_fit, X: pd.DataFrame, y: pd.Series, seed: int) -> float:
     skf = StratifiedKFold(n_splits=INNER_FOLDS, shuffle=True, random_state=seed)
     aucs = []
     for tr, te in skf.split(X, y):
-        clf = make_clf()
-        clf.fit(X.iloc[tr], y.iloc[tr])
+        clf = make_clf_and_fit(X.iloc[tr], y.iloc[tr])
         p = clf.predict_proba(X.iloc[te])[:, 1]
         aucs.append(roc_auc_score(y.iloc[te], p))
     return float(np.mean(aucs))
 
-def tune_xgb(n_trials: int = N_TRIALS, seed: int = 42) -> dict:
-    from src.models.xgb import XGBWrapper
+def _tune_xgb(X: pd.DataFrame, y: pd.Series, types_meta: dict, seed: int, n_trials: int) -> dict:
     from xgboost import XGBClassifier
-    X, y, meta = load(REPO_ROOT)
-    nominal = [c for c, i in meta.items() if i["type"] == "nominal"]
+    nominal = [c for c, i in types_meta.items() if i["type"] == "nominal" and c in X.columns]
     X_cat = X.copy()
     for c in nominal:
         X_cat[c] = X_cat[c].astype("category")
 
     def objective(trial):
         params = dict(
-            tree_method="hist",
-            enable_categorical=True,
-            random_state=seed,
-            n_jobs=-1,
+            tree_method="hist", enable_categorical=True, random_state=seed, n_jobs=-1,
             eval_metric="logloss",
             n_estimators=trial.suggest_int("n_estimators", 50, 500),
             max_depth=trial.suggest_int("max_depth", 2, 8),
@@ -1681,17 +2083,17 @@ def tune_xgb(n_trials: int = N_TRIALS, seed: int = 42) -> dict:
             reg_alpha=trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
             reg_lambda=trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
         )
-        return _inner_cv_score(lambda: XGBClassifier(**params), X_cat, y, seed)
-
+        def make(Xtr, ytr):
+            clf = XGBClassifier(**params); clf.fit(Xtr, ytr); return clf
+        return _inner_cv_score(make, X_cat, y, seed)
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     return study.best_params
 
-def tune_lgbm(n_trials: int = N_TRIALS, seed: int = 42) -> dict:
+def _tune_lgbm(X: pd.DataFrame, y: pd.Series, types_meta: dict, seed: int, n_trials: int) -> dict:
     from lightgbm import LGBMClassifier
-    X, y, meta = load(REPO_ROOT)
-    nominal = [c for c, i in meta.items() if i["type"] == "nominal"]
+    nominal = [c for c, i in types_meta.items() if i["type"] == "nominal" and c in X.columns]
     cat_idx = [X.columns.get_loc(c) for c in nominal]
     X_cat = X.copy()
     for c in nominal:
@@ -1699,9 +2101,7 @@ def tune_lgbm(n_trials: int = N_TRIALS, seed: int = 42) -> dict:
 
     def objective(trial):
         params = dict(
-            random_state=seed,
-            n_jobs=-1,
-            verbosity=-1,
+            random_state=seed, n_jobs=-1, verbosity=-1,
             n_estimators=trial.suggest_int("n_estimators", 50, 500),
             max_depth=trial.suggest_int("max_depth", -1, 12),
             num_leaves=trial.suggest_int("num_leaves", 8, 128),
@@ -1712,101 +2112,88 @@ def tune_lgbm(n_trials: int = N_TRIALS, seed: int = 42) -> dict:
             reg_alpha=trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
             reg_lambda=trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
         )
-        def make():
+        def make(Xtr, ytr):
             clf = LGBMClassifier(**params)
-            # categorical_feature is passed at fit time
-            class _Wrap:
-                def fit(self, Xtr, ytr):
-                    clf.fit(Xtr, ytr, categorical_feature=cat_idx)
-                    return self
-                def predict_proba(self, Xte):
-                    return clf.predict_proba(Xte)
-            return _Wrap()
+            clf.fit(Xtr, ytr, categorical_feature=cat_idx)
+            return clf
         return _inner_cv_score(make, X_cat, y, seed)
-
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     return study.best_params
 
-def tune_logit(n_trials: int = N_TRIALS, seed: int = 42) -> dict:
+def _tune_logit(X: pd.DataFrame, y: pd.Series, types_meta: dict, seed: int, n_trials: int) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.compose import ColumnTransformer
     from sklearn.preprocessing import OneHotEncoder, StandardScaler
     from sklearn.pipeline import Pipeline
-    X, y, meta = load(REPO_ROOT)
-    nominal = [c for c, i in meta.items() if i["type"] == "nominal"]
+    nominal = [c for c, i in types_meta.items() if i["type"] == "nominal" and c in X.columns]
     other = [c for c in X.columns if c not in nominal]
 
     def objective(trial):
         C = trial.suggest_float("C", 1e-3, 10.0, log=True)
-        def make():
+        def make(Xtr, ytr):
             pre = ColumnTransformer([
                 ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), nominal),
                 ("num", StandardScaler(), other),
             ])
-            return Pipeline([("pre", pre),
-                             ("lr", LogisticRegression(solver="lbfgs", max_iter=2000,
-                                                       C=C, random_state=seed))])
+            pipe = Pipeline([("pre", pre),
+                             ("lr", LogisticRegression(solver="lbfgs", max_iter=2000, C=C, random_state=seed))])
+            pipe.fit(Xtr, ytr)
+            return pipe
         return _inner_cv_score(make, X, y, seed)
-
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     return study.best_params
 
-def tune_all_classicals(seed: int = 42) -> dict:
+def tune_classicals_for_fold(
+    X_train_outer: pd.DataFrame,
+    y_train_outer: pd.Series,
+    types_meta: dict,
+    seed: int = 42,
+    n_trials: int = N_TRIALS_DEFAULT,
+) -> dict[str, dict]:
+    """Run Optuna for each of {xgb, lgbm, logit} on the outer-training fold only.
+
+    Returns:
+        {"xgb": best_params, "lgbm": best_params, "logit": best_params}
+    """
     return {
-        "xgb": tune_xgb(seed=seed),
-        "lgbm": tune_lgbm(seed=seed),
-        "logit": tune_logit(seed=seed),
+        "xgb":   _tune_xgb(X_train_outer, y_train_outer, types_meta, seed, n_trials),
+        "lgbm":  _tune_lgbm(X_train_outer, y_train_outer, types_meta, seed, n_trials),
+        "logit": _tune_logit(X_train_outer, y_train_outer, types_meta, seed, n_trials),
     }
 ```
-
-Note: `PlainLogit` and `LGBMWrapper` currently accept `params` only for some fields. For pass 2 to apply tuned LR `C`, extend `PlainLogit.__init__` to accept a `params` dict and forward to `LogisticRegression`. Edit `src/models/logit.py`:
-
-Add after `class PlainLogit:`:
-```python
-    def __init__(self, params: dict | None = None):
-        self.params = params or {}
-```
-And in `fit_predict`, replace the `LogisticRegression(...)` line with:
-```python
-        lr_kwargs = dict(solver="lbfgs", max_iter=2000, random_state=seed)
-        lr_kwargs.update(self.params)
-        pipe = Pipeline([("pre", pre), ("lr", LogisticRegression(**lr_kwargs))])
-```
-Then in `src/runner.py::_build_models`, update the `PlainLogit()` instantiation to `PlainLogit(params=tuned_params.get("logit"))`.
 
 - [ ] **Step 4: Pass**
 
 ```bash
-cd comparison && uv run pytest tests/test_tuning.py -v
+cd comparison && uv run pytest tests/test_tuning.py -v -m slow
+cd comparison && uv run pytest tests/test_tuning.py::test_signature_only_consumes_train_rows -v
 ```
 
 - [ ] **Step 5: Commit**
 
 ```bash
-cd .. && git add comparison/src/tuning.py comparison/tests/test_tuning.py \
-                comparison/src/models/logit.py comparison/src/runner.py
-git commit -m "feat(comparison): Optuna tuning for XGB/LGBM/logit (pass 2)"
+cd .. && git add comparison/src/tuning.py comparison/tests/test_tuning.py
+git commit -m "feat(comparison): per-outer-fold nested Optuna tuning (no leakage)"
 ```
 
 ---
 
-## Task 18: Execute pass 1 (defaults)
+## Task 19: Execute pass 1 (defaults)
 
-**Files:**
-- Execution only — produces `comparison/results/per_fold_defaults.csv`
+**Files:** execution only — produces `comparison/results/per_fold_defaults.csv` and `predictions_defaults.parquet`.
 
-- [ ] **Step 1: Confirm WoE sanity check passes**
+- [ ] **Step 1: Gating sanity check**
 
 ```bash
-cd comparison && uv run pytest tests/test_woe_logit.py -v
+cd comparison && uv run pytest tests/test_woe_logit.py::test_full_sample_refit_matches_report_coefficients -v
 ```
-Must show `test_full_sample_refit_matches_report_auc PASSED`. Do not proceed otherwise.
+Must show PASSED. Do not proceed otherwise — debug Task 9 first.
 
-- [ ] **Step 2: Run all fast (non-slow) tests once**
+- [ ] **Step 2: All non-slow tests**
 
 ```bash
 cd comparison && uv run pytest -v -m "not slow"
@@ -1818,39 +2205,40 @@ Expected: all green.
 ```bash
 cd comparison && uv run python -m src.runner --pass defaults
 ```
-Expected wall-clock on M2 Max: ≤ 45 min (CARTE dominant). Output: `comparison/results/per_fold_defaults.csv` with 80 rows (8 models × 10 folds).
+Expected wall-clock on M2 Max: ≤ 45 min (CARTE dominant). Outputs: `comparison/results/per_fold_defaults.csv` (80 rows) and `predictions_defaults.parquet` (8 models × 1,000 rows = 8,000 rows).
 
-- [ ] **Step 4: Quick eyeball check**
+- [ ] **Step 4: Eyeball**
 
 ```bash
 cd comparison && uv run python -c "
 import pandas as pd
 df = pd.read_csv('results/per_fold_defaults.csv')
+preds = pd.read_parquet('results/predictions_defaults.parquet')
 print(df.groupby('model')[['auc','gini','ks','brier','logloss','runtime_s']].mean().round(4))
-print('row count:', len(df))
+print('CSV rows:', len(df), '| Parquet rows:', len(preds))
 "
 ```
-Expected: 80 rows; AUCs in [0.5, 0.9]; runtime column shows CARTE >> others.
+Expected: 80 CSV rows; 8,000 parquet rows; AUCs in [0.5, 0.9]; CARTE runtime >> others.
 
 - [ ] **Step 5: Commit results**
 
 ```bash
-cd .. && git add comparison/results/per_fold_defaults.csv
-git commit -m "results(comparison): pass 1 per-fold metrics (defaults)"
+cd .. && git add comparison/results/per_fold_defaults.csv comparison/results/predictions_defaults.parquet
+git commit -m "results(comparison): pass 1 (defaults) — per-fold metrics + OOF predictions"
 ```
 
 ---
 
-## Task 19: Execute pass 2 (tuned classicals)
+## Task 20: Execute pass 2 (tuned classicals, nested Optuna)
 
 - [ ] **Step 1: Run pass 2**
 
 ```bash
 cd comparison && uv run python -m src.runner --pass tuned
 ```
-Expected wall-clock: ≤ 60 min (Optuna tuning dominates). Output: `comparison/results/per_fold_tuned.csv` with 80 rows. WoE-logit and TFM rows are copied from pass 1 logic (runner re-runs everything; that's fine — costs little extra time for the non-tuned models).
+Expected wall-clock on M2 Max: 1–2.5 hours (10 outer folds × 3 classicals × 50 trials × 5 inner fits dominates). Outputs: `per_fold_tuned.csv` (80 rows; 50 = 5 unchanged-model rows reused from pass 1 + 30 freshly tuned classical rows; total still 80) and `predictions_tuned.parquet` (8,000 rows).
 
-- [ ] **Step 2: Eyeball**
+- [ ] **Step 2: Eyeball delta**
 
 ```bash
 cd comparison && uv run python -c "
@@ -1860,18 +2248,18 @@ b = pd.read_csv('results/per_fold_tuned.csv').groupby('model')['auc'].mean()
 print(pd.DataFrame({'defaults': a, 'tuned': b, 'delta': b - a}).round(4))
 "
 ```
-Expected: woe_logit, tabpfn_v2, tabicl, tabdpt, carte deltas ≈ 0 (only sampling noise); xgb, lgbm, logit deltas likely positive.
+Expected: woe_logit + 4 TFMs deltas exactly 0 (rows copied verbatim); xgb/lgbm/logit deltas likely ≥ 0.
 
 - [ ] **Step 3: Commit results**
 
 ```bash
-cd .. && git add comparison/results/per_fold_tuned.csv
-git commit -m "results(comparison): pass 2 per-fold metrics (tuned classicals)"
+cd .. && git add comparison/results/per_fold_tuned.csv comparison/results/predictions_tuned.parquet
+git commit -m "results(comparison): pass 2 (nested Optuna tuning) — per-fold metrics + OOF predictions"
 ```
 
 ---
 
-## Task 20: Summary markdown generator
+## Task 21: Summary markdown with DeLong + Wilcoxon + disclaimer
 
 **Files:**
 - Create: `comparison/src/summary.py`
@@ -1882,25 +2270,33 @@ git commit -m "results(comparison): pass 2 per-fold metrics (tuned classicals)"
 Create `comparison/tests/test_summary.py`:
 ```python
 from pathlib import Path
-import pandas as pd
 import numpy as np
-from src.summary import build_summary_md
+import pandas as pd
+from src.summary import build_summary_md, DISCLAIMER
 
-def test_build_summary_md_contains_models(tmp_path):
+def _fake_inputs():
     df = pd.DataFrame({
         "model": ["woe_logit"] * 10 + ["xgb"] * 10,
         "fold_idx": list(range(10)) * 2,
         "auc": np.r_[np.linspace(0.78, 0.82, 10), np.linspace(0.79, 0.83, 10)],
-        "gini": 0.6,
-        "ks": 0.5,
-        "brier": 0.17,
-        "logloss": 0.5,
-        "runtime_s": 1.0,
+        "gini": 0.6, "ks": 0.5, "brier": 0.17, "logloss": 0.5, "runtime_s": 1.0,
     })
-    # Also need per-fold predictions for DeLong; for the unit test we skip DeLong:
-    md = build_summary_md(df, paired_predictions=None, n_comparisons=1)
+    rng = np.random.default_rng(0)
+    rows = []
+    for m in ["woe_logit", "xgb"]:
+        for f in range(10):
+            for i in range(100):
+                rows.append({"model": m, "fold_idx": f, "test_idx": f * 100 + i,
+                             "y": rng.integers(0, 2), "proba": rng.random()})
+    preds = pd.DataFrame(rows)
+    return df, preds
+
+def test_build_summary_includes_disclaimer():
+    df, preds = _fake_inputs()
+    md = build_summary_md(df, preds, champion="woe_logit")
+    assert DISCLAIMER in md
     assert "woe_logit" in md and "xgb" in md
-    assert "AUC" in md
+    assert "DeLong" in md and "Wilcoxon" in md
 ```
 
 - [ ] **Step 2: Fail**
@@ -1913,7 +2309,7 @@ cd comparison && uv run pytest tests/test_summary.py -v
 
 Create `comparison/src/summary.py`:
 ```python
-"""Render per-fold CSV into a thesis-ready summary markdown."""
+"""Render per-fold CSV + predictions parquet into a thesis-ready summary."""
 from __future__ import annotations
 from pathlib import Path
 import numpy as np
@@ -1923,40 +2319,74 @@ from src.metrics import delong_test, wilcoxon_paired, bonferroni
 CHAMPION = "woe_logit"
 METRICS = ["auc", "gini", "ks", "brier", "logloss"]
 
-CONTEXT = """## Context (not part of paired comparison)
-- Report dev AUC (in-sample): 0.8109
-- Report 10-fold CV AUC: 0.8065
+DISCLAIMER = (
+    "> **Scope of claim (narrow):** This benchmark addresses *discriminatory power only*. "
+    "It does NOT support the broader claim that \"TFMs are better PD models\" — that would "
+    "require calibration quality, rating-grade homogeneity/heterogeneity, PSI stability, and "
+    "out-of-time validation, all of which the `pd-autopilot` pipeline provides for the incumbent "
+    "but are out of scope here."
+)
+
+CONTEXT = """## Context (not directly comparable — different preprocessing path / fold seed)
+- Report dev AUC (in-sample, loans_clean): 0.8109
+- Report 10-fold CV AUC (loans_clean): 0.8065
 - Report bootstrap AUC: 0.8026
 """
 
-def build_summary_md(df: pd.DataFrame,
-                     paired_predictions: dict | None,
-                     n_comparisons: int) -> str:
+def _paired_tests(df: pd.DataFrame, preds: pd.DataFrame, champion: str) -> dict[str, dict]:
+    """For each non-champion model, compute DeLong and Wilcoxon p-values."""
+    models = list(df["model"].unique())
+    n_comp = sum(1 for m in models if m != champion)
+
+    ch_preds = preds[preds.model == champion].sort_values(["fold_idx", "test_idx"])
+    y_all = ch_preds["y"].values
+    p_ch = ch_preds["proba"].values
+    ch_aucs = df[df.model == champion].sort_values("fold_idx")["auc"].values
+
+    out: dict[str, dict] = {}
+    for m in models:
+        if m == champion:
+            continue
+        m_preds = preds[preds.model == m].sort_values(["fold_idx", "test_idx"])
+        p_m = m_preds["proba"].values
+        _, p_delong = delong_test(y_all, p_m, p_ch)
+        m_aucs = df[df.model == m].sort_values("fold_idx")["auc"].values
+        try:
+            _, p_wilcox = wilcoxon_paired(m_aucs, ch_aucs)
+        except ValueError:
+            p_wilcox = 1.0
+        out[m] = {
+            "delong_p": p_delong,
+            "delong_bonf": bonferroni(p_delong, n_comp),
+            "wilcoxon_p": p_wilcox,
+            "wilcoxon_bonf": bonferroni(p_wilcox, n_comp),
+        }
+    return out
+
+def build_summary_md(df: pd.DataFrame, preds: pd.DataFrame, champion: str = CHAMPION) -> str:
     g = df.groupby("model")
     agg = g[METRICS].agg(["mean", "std"]).round(4)
+    tests = _paired_tests(df, preds, champion)
+
+    header = ("| Model | " + " | ".join(m.upper() for m in METRICS)
+              + " | DeLong p | DeLong (bonf) | Wilcoxon p | Wilcoxon (bonf) |")
+    sep = "|" + "|".join(["---"] * (len(METRICS) + 5)) + "|"
+
     rows = []
     for model in df["model"].unique():
-        cells = []
-        for m in METRICS:
-            mu, sd = agg.loc[model, (m, "mean")], agg.loc[model, (m, "std")]
-            cells.append(f"{mu:.4f} ± {sd:.4f}")
-        if model == CHAMPION or paired_predictions is None:
-            tail = "reference"
+        cells = [f"{agg.loc[model, (m, 'mean')]:.4f} ± {agg.loc[model, (m, 'std')]:.4f}" for m in METRICS]
+        if model == champion:
+            tail = ["reference"] * 4
         else:
-            y, p_c, p_m = paired_predictions["y"], paired_predictions[CHAMPION], paired_predictions[model]
-            _, p_delong = delong_test(y, p_c, p_m)
-            p_bonf = bonferroni(p_delong, n_comparisons)
-            tail = f"p={p_delong:.3f} (bonf={p_bonf:.3f})"
-        rows.append(f"| {model} | " + " | ".join(cells) + f" | {tail} |")
-    header = "| Model | " + " | ".join(m.upper() for m in METRICS) + " | vs Champion (DeLong) |"
-    sep = "|" + "|".join(["---"] * (len(METRICS) + 2)) + "|"
+            t = tests[model]
+            tail = [f"{t['delong_p']:.3f}", f"{t['delong_bonf']:.3f}",
+                    f"{t['wilcoxon_p']:.3f}", f"{t['wilcoxon_bonf']:.3f}"]
+        rows.append("| " + model + " | " + " | ".join(cells) + " | " + " | ".join(tail) + " |")
+
     return "\n".join([
-        "## Headline (10-fold CV)",
-        "",
-        header,
-        sep,
-        *rows,
-        "",
+        DISCLAIMER, "",
+        "## Headline (10-fold CV)", "",
+        header, sep, *rows, "",
         CONTEXT,
     ])
 
@@ -1964,43 +2394,16 @@ def main():
     here = Path(__file__).resolve().parents[1]
     for pass_name in ["defaults", "tuned"]:
         csv_path = here / "results" / f"per_fold_{pass_name}.csv"
-        if not csv_path.exists():
-            print(f"skip {pass_name}: missing {csv_path}")
+        pred_path = here / "results" / f"predictions_{pass_name}.parquet"
+        if not (csv_path.exists() and pred_path.exists()):
+            print(f"skip {pass_name}: missing artefact(s)")
             continue
         df = pd.read_csv(csv_path)
-        # DeLong needs per-fold predictions; the runner doesn't store them yet.
-        # For the markdown we use Wilcoxon on per-fold AUCs as the paired test.
-        md = _build_with_wilcoxon(df)
+        preds = pd.read_parquet(pred_path)
+        md = build_summary_md(df, preds)
         out = here / "results" / f"summary_{pass_name}.md"
         out.write_text(md)
         print(f"wrote {out}")
-
-def _build_with_wilcoxon(df: pd.DataFrame) -> str:
-    g = df.groupby("model")
-    models = list(df["model"].unique())
-    n_comp = len([m for m in models if m != CHAMPION])
-    agg = g[METRICS].agg(["mean", "std"]).round(4)
-    champion_auc = df[df.model == CHAMPION].sort_values("fold_idx")["auc"].values
-    rows = []
-    for model in models:
-        cells = []
-        for m in METRICS:
-            mu, sd = agg.loc[model, (m, "mean")], agg.loc[model, (m, "std")]
-            cells.append(f"{mu:.4f} ± {sd:.4f}")
-        if model == CHAMPION:
-            tail = "reference"
-        else:
-            ch_auc = df[df.model == model].sort_values("fold_idx")["auc"].values
-            try:
-                _, p_w = wilcoxon_paired(champion_auc, ch_auc)
-            except ValueError:
-                p_w = 1.0
-            p_bonf = bonferroni(p_w, n_comp)
-            tail = f"Wilcoxon p={p_w:.3f} (bonf={p_bonf:.3f})"
-        rows.append(f"| {model} | " + " | ".join(cells) + f" | {tail} |")
-    header = "| Model | " + " | ".join(m.upper() for m in METRICS) + " | vs Champion |"
-    sep = "|" + "|".join(["---"] * (len(METRICS) + 2)) + "|"
-    return "\n".join(["## Headline (10-fold CV)", "", header, sep, *rows, "", CONTEXT])
 
 if __name__ == "__main__":
     main()
@@ -2017,119 +2420,14 @@ cd comparison && uv run pytest tests/test_summary.py -v
 ```bash
 cd comparison && uv run python -m src.summary
 ```
-Expected: writes `results/summary_defaults.md` and `results/summary_tuned.md`.
+Outputs `results/summary_defaults.md` and `results/summary_tuned.md` — each starts with the disclaimer.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 cd .. && git add comparison/src/summary.py comparison/tests/test_summary.py \
                 comparison/results/summary_defaults.md comparison/results/summary_tuned.md
-git commit -m "feat(comparison): summary markdown with Wilcoxon paired test"
-```
-
----
-
-## Task 21: Persist per-fold predictions (enables DeLong in analysis notebook)
-
-**Files:**
-- Modify: `comparison/src/runner.py`
-
-The summary uses Wilcoxon (only needs per-fold AUCs). For DeLong we need the actual probabilities. Add a sidecar parquet file.
-
-- [ ] **Step 1: Modify runner to also store predictions**
-
-Edit `comparison/src/runner.py`. In `run_pass`, after the inner loop's `append_row`, also save predictions. Replace the inner `for fold_i` block with:
-
-```python
-        per_fold_preds = {}
-        for fold_i, (tr, te) in enumerate(tqdm(folds, desc=model.name)):
-            row = run_one_fold(model, X_use, y, tr, te, meta)
-            row["fold_idx"] = fold_i
-            row["pass"] = pass_name
-            append_row(out_path, row)
-            # capture probabilities for this fold
-            proba = model.fit_predict(X_use.iloc[tr], y.iloc[tr], X_use.iloc[te], meta)
-            per_fold_preds[fold_i] = pd.DataFrame({
-                "test_idx": te, "y": y.iloc[te].values, "proba": proba,
-            })
-        all_preds = pd.concat([df.assign(fold_idx=i) for i, df in per_fold_preds.items()])
-        all_preds["model"] = model.name
-        pred_path = RESULTS_DIR / f"predictions_{pass_name}.parquet"
-        if pred_path.exists():
-            existing = pd.read_parquet(pred_path)
-            all_preds = pd.concat([existing, all_preds], ignore_index=True)
-        all_preds.to_parquet(pred_path, index=False)
-```
-Note: this calls `fit_predict` twice per fold (once for metrics, once for stored proba). That doubles runtime. Better optimisation: refactor `run_one_fold` to return both metrics and proba. Do that instead:
-
-Replace `run_one_fold` with:
-```python
-def run_one_fold(model, X, y, train_idx, test_idx, meta) -> tuple[dict, np.ndarray]:
-    t0 = time.perf_counter()
-    proba = model.fit_predict(X.iloc[train_idx], y.iloc[train_idx], X.iloc[test_idx], meta)
-    runtime = time.perf_counter() - t0
-    m = compute_all(y.iloc[test_idx].values, proba)
-    m.update(model=model.name, n_train=len(train_idx), n_test=len(test_idx),
-             runtime_s=runtime, fold_idx=-1)
-    return m, proba
-```
-
-And in `run_pass`:
-```python
-        per_fold_preds = []
-        for fold_i, (tr, te) in enumerate(tqdm(folds, desc=model.name)):
-            row, proba = run_one_fold(model, X_use, y, tr, te, meta)
-            row["fold_idx"] = fold_i
-            row["pass"] = pass_name
-            append_row(out_path, row)
-            per_fold_preds.append(pd.DataFrame({
-                "test_idx": te, "y": y.iloc[te].values, "proba": proba,
-                "fold_idx": fold_i, "model": model.name,
-            }))
-        all_preds = pd.concat(per_fold_preds, ignore_index=True)
-        pred_path = RESULTS_DIR / f"predictions_{pass_name}.parquet"
-        if pred_path.exists():
-            existing = pd.read_parquet(pred_path)
-            all_preds = pd.concat([existing, all_preds], ignore_index=True)
-        all_preds.to_parquet(pred_path, index=False)
-```
-
-Also update `test_runner.py::test_run_one_fold_returns_metrics` — `run_one_fold` now returns a tuple:
-```python
-    out, proba = run_one_fold(_M(), X, y, np.arange(80), np.arange(80, 100), meta={})
-    assert "auc" in out and "logloss" in out
-    assert proba.shape == (20,)
-```
-
-- [ ] **Step 2: Pass tests**
-
-```bash
-cd comparison && uv run pytest tests/test_runner.py -v
-```
-
-- [ ] **Step 3: Re-run both passes**
-
-```bash
-cd comparison && rm -f results/predictions_*.parquet results/per_fold_*.csv
-uv run python -m src.runner --pass defaults
-uv run python -m src.runner --pass tuned
-```
-
-- [ ] **Step 4: Regenerate summaries**
-
-```bash
-cd comparison && uv run python -m src.summary
-```
-
-- [ ] **Step 5: Commit**
-
-```bash
-cd .. && git add comparison/src/runner.py comparison/tests/test_runner.py \
-                comparison/results/per_fold_defaults.csv comparison/results/per_fold_tuned.csv \
-                comparison/results/predictions_defaults.parquet \
-                comparison/results/predictions_tuned.parquet \
-                comparison/results/summary_defaults.md comparison/results/summary_tuned.md
-git commit -m "feat(comparison): persist per-fold predictions for paired tests"
+git commit -m "feat(comparison): summary MD with DeLong + Wilcoxon + narrow-claim disclaimer"
 ```
 
 ---
@@ -2141,7 +2439,7 @@ git commit -m "feat(comparison): persist per-fold predictions for paired tests"
 
 - [ ] **Step 1: Build the notebook**
 
-Create `comparison/notebooks/01_results_analysis.ipynb` with the following cells (write as `.py` first then `jupytext --to notebook`, or build the JSON directly). Cell-by-cell content:
+Create `comparison/notebooks/01_results_analysis.ipynb` with these cells. The simplest way: write a Python script and convert via `jupytext`, or build the `.ipynb` JSON directly. Cell contents (each cell separated):
 
 **Cell 1 — imports:**
 ```python
@@ -2149,18 +2447,18 @@ Create `comparison/notebooks/01_results_analysis.ipynb` with the following cells
 import sys; sys.path.insert(0, "..")
 import numpy as np, pandas as pd, matplotlib.pyplot as plt
 from pathlib import Path
-from sklearn.metrics import roc_curve
+from sklearn.metrics import roc_curve, roc_auc_score
 from sklearn.calibration import calibration_curve
 from src.metrics import delong_test, wilcoxon_paired, bonferroni
 RES = Path("../results")
-PASS = "defaults"   # change to "tuned" and re-run cells for second pass
+PASS = "defaults"   # change to "tuned" and re-execute the cells for second pass
 df = pd.read_csv(RES / f"per_fold_{PASS}.csv")
 preds = pd.read_parquet(RES / f"predictions_{PASS}.parquet")
 models = list(df["model"].unique())
 CHAMPION = "woe_logit"
 ```
 
-**Cell 2 — ROC overlay (concatenated across folds):**
+**Cell 2 — ROC overlay:**
 ```python
 fig, ax = plt.subplots(figsize=(7, 7))
 for m in models:
@@ -2188,7 +2486,7 @@ fig.savefig(RES / "figures" / f"reliability_{PASS}.png", dpi=150, bbox_inches="t
 plt.show()
 ```
 
-**Cell 4 — AUC boxplot across folds:**
+**Cell 4 — AUC boxplot:**
 ```python
 fig, ax = plt.subplots(figsize=(8, 5))
 data = [df[df.model == m]["auc"].values for m in models]
@@ -2199,7 +2497,7 @@ fig.savefig(RES / "figures" / f"auc_boxplot_{PASS}.png", dpi=150, bbox_inches="t
 plt.show()
 ```
 
-**Cell 5 — Forest plot of paired diffs vs champion (with DeLong CI):**
+**Cell 5 — Forest plot of paired diffs:**
 ```python
 ch = preds[preds.model == CHAMPION].sort_values(["fold_idx", "test_idx"])
 y_all = ch["y"].values
@@ -2210,9 +2508,7 @@ for m in models:
     if m == CHAMPION: continue
     sub = preds[preds.model == m].sort_values(["fold_idx", "test_idx"])
     p_m = sub["proba"].values
-    z, p = delong_test(y_all, p_m, p_ch)   # z>0 ⇒ challenger > champion
-    # rough 95% CI on the AUC diff: invert z = diff / se → se = diff/z, then ±1.96·se
-    from sklearn.metrics import roc_auc_score
+    z, p = delong_test(y_all, p_m, p_ch)
     diff = roc_auc_score(y_all, p_m) - roc_auc_score(y_all, p_ch)
     se = abs(diff / z) if z != 0 else 0.05
     rows.append((m, diff, diff - 1.96 * se, diff + 1.96 * se, p))
@@ -2239,71 +2535,51 @@ rt.columns = ["mean_s_per_fold", "total_s"]
 rt.sort_values("total_s", ascending=False)
 ```
 
-**Cell 7 — Save final markdown summary with both Wilcoxon and DeLong p-values:**
+**Cell 7 — Render saved summary inline:**
 ```python
-n_comp = len(models) - 1
-lines = ["## Paired tests vs woe_logit", "",
-         "| Model | DeLong p | DeLong p (bonf) | Wilcoxon p | Wilcoxon p (bonf) |",
-         "|---|---|---|---|---|"]
-ch_aucs = df[df.model == CHAMPION].sort_values("fold_idx")["auc"].values
-for m in models:
-    if m == CHAMPION: continue
-    sub = preds[preds.model == m].sort_values(["fold_idx", "test_idx"])
-    _, pd_ = delong_test(y_all, sub["proba"].values, p_ch)
-    ch_m_aucs = df[df.model == m].sort_values("fold_idx")["auc"].values
-    try:
-        _, pw = wilcoxon_paired(ch_aucs, ch_m_aucs)
-    except ValueError:
-        pw = 1.0
-    lines.append(f"| {m} | {pd_:.3f} | {bonferroni(pd_, n_comp):.3f} | {pw:.3f} | {bonferroni(pw, n_comp):.3f} |")
-out = RES / f"paired_tests_{PASS}.md"
-out.write_text("\n".join(lines))
-print(f"wrote {out}")
+from IPython.display import Markdown, display
+display(Markdown((RES / f"summary_{PASS}.md").read_text()))
 ```
 
-- [ ] **Step 2: Execute notebook for both passes**
+- [ ] **Step 2: Duplicate for tuned pass**
 
-```bash
-cd comparison && uv run jupyter nbconvert --to notebook --execute notebooks/01_results_analysis.ipynb --inplace
-# Edit cell 1 (PASS = "tuned") and re-execute, OR use papermill:
-uv run python -m pip install papermill   # one-off, optional
-```
-Or simpler: duplicate the notebook to `02_results_analysis_tuned.ipynb`, change cell 1's `PASS = "tuned"`, execute both:
 ```bash
 cd comparison
 cp notebooks/01_results_analysis.ipynb notebooks/02_results_analysis_tuned.ipynb
-# manually edit cell 1 of 02_..._tuned.ipynb so PASS="tuned" (sed-friendly:
+# Update cell 1 in the duplicate so PASS="tuned"
 sed -i '' 's/PASS = "defaults"/PASS = "tuned"/' notebooks/02_results_analysis_tuned.ipynb
+```
+
+- [ ] **Step 3: Execute both**
+
+```bash
+cd comparison
 uv run jupyter nbconvert --to notebook --execute notebooks/01_results_analysis.ipynb --inplace
 uv run jupyter nbconvert --to notebook --execute notebooks/02_results_analysis_tuned.ipynb --inplace
 ```
 
-- [ ] **Step 3: Verify outputs**
+- [ ] **Step 4: Verify**
 
 ```bash
 ls comparison/results/figures/
 ```
-Expected files: `roc_overlay_defaults.png`, `roc_overlay_tuned.png`, `reliability_defaults.png`, `reliability_tuned.png`, `auc_boxplot_defaults.png`, `auc_boxplot_tuned.png`, `forest_defaults.png`, `forest_tuned.png`, plus `paired_tests_defaults.md` and `paired_tests_tuned.md` in `results/`.
+Expected: `roc_overlay_defaults.png`, `roc_overlay_tuned.png`, `reliability_defaults.png`, `reliability_tuned.png`, `auc_boxplot_defaults.png`, `auc_boxplot_tuned.png`, `forest_defaults.png`, `forest_tuned.png`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 cd .. && git add comparison/notebooks/01_results_analysis.ipynb \
                 comparison/notebooks/02_results_analysis_tuned.ipynb \
-                comparison/results/figures/ \
-                comparison/results/paired_tests_defaults.md \
-                comparison/results/paired_tests_tuned.md
-git commit -m "feat(comparison): analysis notebook with ROC/reliability/boxplot/forest"
+                comparison/results/figures/
+git commit -m "feat(comparison): analysis notebooks (ROC/reliability/boxplot/forest)"
 ```
 
 ---
 
-## Task 23: Final benchmark orchestration notebook
+## Task 23: Top-level benchmark notebook
 
 **Files:**
 - Create: `comparison/notebooks/benchmark.ipynb`
-
-A thin "run the whole thing" notebook for the thesis appendix. The runner already does the heavy lifting; this notebook is a documented entry-point.
 
 - [ ] **Step 1: Build the notebook**
 
@@ -2316,7 +2592,8 @@ Create `comparison/notebooks/benchmark.ipynb` with these cells:
 Reproducible entry-point for the comparison defined in
 [2026-05-22-tfm-comparison-design.md](../../docs/superpowers/specs/2026-05-22-tfm-comparison-design.md).
 
-Runs both passes and renders the summary tables inline.
+**Scope (narrow):** Pure discrimination only. Does NOT support the claim that
+"TFMs are better PD models" — see disclaimer in `summary_*.md` for full caveats.
 ```
 
 **Cell 2 — env check:**
@@ -2332,56 +2609,43 @@ import torch; print("torch:", torch.__version__, "MPS:", torch.backends.mps.is_a
 
 **Cell 3 — markdown:**
 ```markdown
-## Pass 1 — defaults
-Run from a terminal (slow, do not block the kernel):
-
+## How to run
+From a terminal:
 ```bash
-cd comparison && uv run python -m src.runner --pass defaults
+cd comparison
+uv run python -m src.runner --pass defaults
+uv run python -m src.runner --pass tuned
+uv run python -m src.summary
 ```
 ```
 
-**Cell 4 — load and render pass 1 summary:**
+**Cell 4 — load + render pass 1:**
 ```python
 df1 = pd.read_csv(RES / "per_fold_defaults.csv")
 df1.groupby("model")[["auc","gini","ks","brier","logloss","runtime_s"]].agg(["mean","std"]).round(4)
 ```
 
-**Cell 5 — markdown:**
-```markdown
-## Pass 2 — tuned classicals
-```bash
-cd comparison && uv run python -m src.runner --pass tuned
-```
-```
-
-**Cell 6 — load and render pass 2 summary:**
+**Cell 5 — load + render pass 2:**
 ```python
 df2 = pd.read_csv(RES / "per_fold_tuned.csv")
 df2.groupby("model")[["auc","gini","ks","brier","logloss","runtime_s"]].agg(["mean","std"]).round(4)
 ```
 
-**Cell 7 — markdown:**
-```markdown
-## Headline comparison
-```
-
-**Cell 8 — defaults vs tuned delta:**
+**Cell 6 — defaults vs tuned delta:**
 ```python
 a = df1.groupby("model")["auc"].mean()
 b = df2.groupby("model")["auc"].mean()
 pd.DataFrame({"defaults": a, "tuned": b, "delta": b - a}).round(4).sort_values("tuned", ascending=False)
 ```
 
-**Cell 9 — display summary MDs inline:**
+**Cell 7 — display summary MDs inline:**
 ```python
 from IPython.display import Markdown, display
 display(Markdown((RES / "summary_defaults.md").read_text()))
 display(Markdown((RES / "summary_tuned.md").read_text()))
-display(Markdown((RES / "paired_tests_defaults.md").read_text()))
-display(Markdown((RES / "paired_tests_tuned.md").read_text()))
 ```
 
-- [ ] **Step 2: Execute (assuming runner already produced CSVs)**
+- [ ] **Step 2: Execute**
 
 ```bash
 cd comparison && uv run jupyter nbconvert --to notebook --execute notebooks/benchmark.ipynb --inplace
@@ -2398,62 +2662,78 @@ git commit -m "feat(comparison): top-level benchmark notebook"
 
 ## Task 24: Final acceptance check
 
-- [ ] **Step 1: Clean test run**
+- [ ] **Step 1: All non-slow tests pass**
 
 ```bash
-cd comparison && uv run pytest -v
+cd comparison && uv run pytest -v -m "not slow"
 ```
-Expected: all non-slow tests pass. Slow tests skipped without `-m slow`.
 
-- [ ] **Step 2: Slow test pass (TFMs)**
+- [ ] **Step 2: All slow tests pass**
 
 ```bash
 cd comparison && uv run pytest -v -m slow
 ```
-Expected: all 4 TFM wrapper smoke tests pass.
 
-- [ ] **Step 3: WoE sanity reconfirmation**
-
-```bash
-cd comparison && uv run pytest tests/test_woe_logit.py::test_full_sample_refit_matches_report_auc -v
-```
-Expected: PASS, AUC in [0.80, 0.82].
-
-- [ ] **Step 4: Artefact inventory**
+- [ ] **Step 3: Gating sanity test**
 
 ```bash
-ls -la comparison/results/ comparison/results/figures/
+cd comparison && uv run pytest tests/test_woe_logit.py::test_full_sample_refit_matches_report_coefficients -v
 ```
-Expected files exist:
-- `per_fold_defaults.csv` (80 rows)
-- `per_fold_tuned.csv` (80 rows)
-- `predictions_defaults.parquet`
-- `predictions_tuned.parquet`
-- `summary_defaults.md`
-- `summary_tuned.md`
-- `paired_tests_defaults.md`
-- `paired_tests_tuned.md`
-- 8 figures under `figures/`
+Expected: PASSED — every coefficient within ±0.05.
+
+- [ ] **Step 4: Spec acceptance criteria — by-number check**
+
+| # | Criterion | Verification |
+|---|---|---|
+| 1 | `uv sync && uv run pytest tests/` passes | Steps 1+2 above |
+| 2 | `test_full_sample_refit_matches_report_coefficients` passes | Step 3 |
+| 3 | `test_special_codes_isolated` passes | `uv run pytest tests/test_woe_logit.py::test_special_codes_isolated -v` |
+| 4 | `test_signature_only_consumes_train_rows` (no-leakage guard) | `uv run pytest tests/test_tuning.py::test_signature_only_consumes_train_rows -v` |
+| 5 | `test_caps_derived_from_train_only` | `uv run pytest tests/test_preprocessing.py::test_caps_derived_from_train_only -v` |
+| 6 | per_fold CSVs have 80 rows each | `wc -l results/per_fold_*.csv` |
+| 7 | predictions parquets have 8,000 rows each | `uv run python -c "import pandas as pd; print(len(pd.read_parquet('results/predictions_defaults.parquet')), len(pd.read_parquet('results/predictions_tuned.parquet')))"` |
+| 8 | Summary MDs begin with disclaimer + contain both DeLong and Wilcoxon | `head -3 results/summary_*.md; grep -l 'DeLong' results/summary_*.md; grep -l 'Wilcoxon' results/summary_*.md` |
+| 9 | Analysis notebook executes end-to-end | Already done in Task 22 step 3 |
+| 10 | Wall-clock ≤ 3 hours combined | Recorded during Tasks 19 + 20 |
+
+Run each check. Any failure → fix before tagging.
 
 - [ ] **Step 5: Tag**
 
 ```bash
-cd .. && git tag -a comparison-v1 -m "TFM vs WoE-logit comparison complete"
+cd .. && git tag -a comparison-v1 -m "TFM vs WoE-logit comparison complete (post-Codex revision)"
 ```
 
-- [ ] **Step 6: Final commit (if anything outstanding)**
+- [ ] **Step 6: Final commit if anything outstanding**
 
 ```bash
 git status
-# if clean: nothing to do
+# if clean: done
 ```
 
 ---
 
-## Self-review checklist (run after writing this plan)
+## Self-review checklist
 
-- [x] Spec coverage: §1 goal → all tasks; §3 lineup → 8 wrappers in Tasks 8–15; §4 protocol → Task 3 (CV) + Task 17 (Optuna) + Tasks 18, 19 (execution); §5 metrics & tests → Tasks 4, 5, 6 + Task 22 (forest, DeLong); §6 architecture → directory in Task 1; §7 interface → Task 7; §8 woe_logit faithfulness → Task 8 incl. sanity test; §9 environment → Task 1; §10 reproducibility → seeds in Tasks 3, 8–17; §11 artefacts → Tasks 20, 22; §13 acceptance → Task 24.
-- [x] No placeholders: every code step contains complete code.
-- [x] Type consistency: `PDModel.fit_predict` signature identical across base.py, every wrapper, and runner.
-- [x] Frequent commits: 22 commits across the plan.
-- [x] TDD: every implementation task has failing-test → pass-test sequence.
+- [x] **Spec coverage:**
+  - §1 narrow-claim → README + Task 21 disclaimer + Task 23 cell 1
+  - §2 fold-safe preprocessing → Task 3 + Task 17 step 3
+  - §2 no `loans_clean.csv` → Task 17 reads raw `loans.csv`
+  - §3 8-model lineup → Tasks 9–16
+  - §4 nested Optuna → Task 18; Task 17 calls it per outer fold
+  - §4 coef-level sanity → Task 9 step 1 + Task 19 step 1
+  - §5 predictions parquet first-class → Task 17 from v1 (no retrofit)
+  - §5 DeLong + Wilcoxon in summary → Task 21
+  - §6 architecture matches → file paths in Tasks 1–21
+  - §7 PDModel protocol → Task 8
+  - §8 woe_logit faithfulness → Task 9 (penalty=None, explicit trends, CP/MIP fallback)
+  - §9 env with pyarrow → Task 1 step 3
+  - §10 reproducibility → seeds in Tasks 4, 9–18
+  - §11 reporting artefacts → Tasks 21, 22
+  - §12 non-goals — no 8-var view → respected throughout (challengers always see all 20)
+  - §13 acceptance criteria 1–10 → mapped 1:1 in Task 24 step 4
+- [x] **No placeholders:** every code step contains complete code.
+- [x] **Type consistency:** `PDModel.fit_predict` signature identical across `base.py`, all 8 wrappers, runner; `tune_classicals_for_fold` signature locked by the leakage-guard test.
+- [x] **Frequent commits:** 24 commits across the plan.
+- [x] **TDD:** every implementation task has failing-test → pass-test sequence.
+- [x] **v1 issues addressed:** every Codex finding (commit `842af30` message) has a corresponding task change documented in the header diff.
