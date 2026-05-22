@@ -33,3 +33,28 @@ uv run jupyter lab notebooks/        # interactive analysis
 - `results/predictions_defaults.parquet`, `results/predictions_tuned.parquet` — OOF predictions
 - `results/summary_defaults.md`, `results/summary_tuned.md` — paired tests, mean ± std tables
 - `results/figures/` — ROC overlays, reliability curves, AUC boxplots, forest plots
+
+## Enabling CARTE (optional)
+
+The CARTE foundation model needs a ~7 GB FastText embedding file
+(`cc.en.300.bin`) before its slow test can run. Without it, `pytest -m slow`
+skips only the CARTE test; all other TFMs run normally.
+
+One-time download (Python helper, ~10 min on a fast connection):
+
+```bash
+uv run python -c \
+  "from carte_ai.scripts.download_data import _download_fasttext; _download_fasttext()"
+```
+
+Or manual:
+
+```bash
+curl -L -o \
+  .venv/lib/python3.12/site-packages/carte_ai/data/etc/cc.en.300.bin.gz \
+  https://dl.fbaipublicfiles.com/fasttext/vectors-crawl/cc.en.300.bin.gz
+gunzip .venv/lib/python3.12/site-packages/carte_ai/data/etc/cc.en.300.bin.gz
+```
+
+Once present, CARTE participates in the full `uv run pytest -m slow` run and
+in pipeline passes 1 and 2.
