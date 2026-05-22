@@ -33,3 +33,14 @@ dev = [
 markers = [
     "slow: heavy TFM tests; opt in with -m slow",
 ]
+# Without -m slow, ignore the TFM test files entirely. Pytest's default
+# collection imports every test module to discover tests, which pulls torch
+# (via tabpfn/tabicl/tabdpt/carte) into the same process as LightGBM. Torch
+# bundles its own libomp; LightGBM uses Homebrew libomp; co-loading segfaults
+# LGBMClassifier.fit() on macOS arm64. Skipping collection of slow-tagged
+# files keeps the fast suite torch-free.
+#
+# Use:
+#   uv run pytest                  → fast suite, no torch
+#   uv run pytest -m slow          → opt-in: collects everything, runs slow
+addopts = "--ignore=tests/test_tabpfn.py --ignore=tests/test_tabicl.py --ignore=tests/test_tabdpt.py --ignore=tests/test_carte.py"
