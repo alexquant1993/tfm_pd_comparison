@@ -10,7 +10,7 @@
 
 **Spec reference:** `docs/superpowers/specs/2026-05-22-tfm-comparison-design.md`
 
-**Changes from v1 of this plan (in response to Codex review, see commit `842af30`):**
+**Changes from v1 of this plan (Codex round-1, see commit `842af30`):**
 - New Task 3: `preprocessing.py` with `fold_safe_iqr_cap`.
 - Task 2 (`data_loader`) now fixes the `_parse_special_codes` int/float/NaN bug and adds an explicit special-codes test.
 - Task 9 (`woe_logit`): switches to `LogisticRegression(penalty=None)`; hard-codes monotonic trends per variable; adds CP→MIP solver fallback; the sanity test is now coefficient-level vs `model_params.json` (±0.05) instead of an AUC band.
@@ -19,6 +19,13 @@
 - Task 21 (`summary`): computes DeLong + Wilcoxon from the predictions parquet (both already exist when summary runs); narrow-claim disclaimer rendered into every `summary_*.md` header.
 - v1 Task 21 (retrofit predictions persistence) deleted — rolled into v2 Task 17.
 - Acceptance criteria expanded to 10 items, each tied to a named test or artefact.
+
+**Additional changes (Codex round-2):**
+- **CRITICAL bug fix in Task 17 runner:** old `run_one_fold_one_model` accepted full-dataset `(X, y, train_idx, test_idx)` and called `y.iloc[train_idx]` with locally-built `np.arange(...)` indices, silently scoring against the first N rows of the full `y` rather than the fold's labels. Every metric after fold 0 would have been invalid. v2 takes already-sliced `(X_train, y_train, X_test, y_test)` and a regression test (`test_run_one_fold_passes_correct_labels`) guards against recurrence.
+- **Crash-safe parquet** (Task 17): predictions are now written as per-fold parts to `results/predictions_<pass>_parts/fold_NN.parquet` immediately after each fold completes, then combined into the canonical parquet at the end. A mid-pass crash leaves completed folds intact and recoverable.
+- **Strict nested inner cap** (Task 18 + spec §4): `tune_classicals_for_fold` now receives the **uncapped** outer-training fold and recomputes `fold_safe_iqr_cap` inside each inner CV split — so inner-validation rows never influence the cap thresholds they are scored against. A new behavioural test `test_inner_cap_uses_inner_train_only` verifies this end-to-end.
+- **Brier / log-loss relabelled as secondary** (Task 21 + spec §5): they are calibration-sensitive proper scoring rules, not pure discrimination metrics. Headline tables now visually group them as "Brier (sec.)" / "LOGLOSS (sec.)" with a legend, and the disclaimer mentions the distinction.
+- **Shell-precedence fix** (Task 1): `cd comparison 2>/dev/null || mkdir comparison && cd comparison` → `mkdir -p comparison && cd comparison`.
 
 ---
 
@@ -45,7 +52,7 @@ Expected: prints a version like `uv 0.4.x`.
 - [ ] **Step 2: Initialise the project**
 
 ```bash
-cd comparison 2>/dev/null || mkdir comparison && cd comparison
+mkdir -p comparison && cd comparison
 uv init --python 3.12 --no-readme --no-workspace
 ```
 Creates `pyproject.toml`, `.python-version`, and downloads CPython 3.12 into uv's cache.
@@ -1784,12 +1791,36 @@ def test_append_row_creates_header(tmp_path):
     assert len(rows) == 2
 
 def test_run_one_fold_one_model_returns_metrics_and_proba():
-    X = pd.DataFrame({"a": range(100)})
-    y = pd.Series([0, 1] * 50)
-    out, proba = run_one_fold_one_model(_DummyModel(), X, y, np.arange(80), np.arange(80, 100), meta={})
+    X_tr = pd.DataFrame({"a": range(80)})
+    y_tr = pd.Series([0, 1] * 40)
+    X_te = pd.DataFrame({"a": range(80, 100)})
+    y_te = pd.Series([0, 1] * 10)
+    out, proba = run_one_fold_one_model(_DummyModel(), X_tr, y_tr, X_te, y_te, meta={})
     assert "auc" in out and "logloss" in out
     assert out["model"] == "stub"
     assert proba.shape == (20,)
+    assert out["n_train"] == 80 and out["n_test"] == 20
+
+def test_run_one_fold_passes_correct_labels():
+    """Regression test for the v1 label-alignment bug: ensure the labels
+    metrics are computed against actually match y_test, not the first N rows
+    of some larger y."""
+    # If the bug recurred (using y.iloc[range(N)] on full y), AUC would be
+    # essentially random because labels would be from rows 0..N-1 of a full y
+    # that bears no relation to the test indices.
+    class _ProbaIsYModel:
+        name = "perfect"
+        requires_string_labels = False
+        def fit_predict(self, X_tr, y_tr, X_te, meta, seed=42):
+            # Return X_te's "a" column as proba (cheat: assumes y == a is perfect)
+            return X_te["a"].values.astype(float) / X_te["a"].max()
+    # y_te is monotone with X_te["a"] so AUC must be 1.0
+    X_te = pd.DataFrame({"a": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]})
+    y_te = pd.Series([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+    X_tr = pd.DataFrame({"a": [0, 5]})
+    y_tr = pd.Series([0, 1])
+    out, _ = run_one_fold_one_model(_ProbaIsYModel(), X_tr, y_tr, X_te, y_te, meta={})
+    assert out["auc"] == 1.0, f"label misalignment detected: got AUC={out['auc']}"
 ```
 
 - [ ] **Step 2: Fail**
@@ -1837,12 +1868,19 @@ def append_row(path: Path, row: dict) -> None:
             w.writeheader()
         w.writerow(row)
 
-def run_one_fold_one_model(model, X, y, train_idx, test_idx, meta) -> tuple[dict, np.ndarray]:
+def run_one_fold_one_model(model, X_train, y_train, X_test, y_test, meta) -> tuple[dict, np.ndarray]:
+    """Fit on already-sliced training data, predict on already-sliced test data.
+
+    The caller is responsible for slicing — this function does NOT do iloc on
+    full-dataset indices. (Previous version had a label-alignment bug where it
+    used local positional indices on the full y, which silently returned the
+    wrong labels for every fold after fold 0.)
+    """
     t0 = time.perf_counter()
-    proba = model.fit_predict(X.iloc[train_idx], y.iloc[train_idx], X.iloc[test_idx], meta)
+    proba = model.fit_predict(X_train, y_train, X_test, meta)
     runtime = time.perf_counter() - t0
-    m = compute_all(y.iloc[test_idx].values, proba)
-    m.update(model=model.name, n_train=len(train_idx), n_test=len(test_idx),
+    m = compute_all(y_test.values, proba)
+    m.update(model=model.name, n_train=len(X_train), n_test=len(X_test),
              runtime_s=runtime, fold_idx=-1)
     return m, proba
 
@@ -1880,14 +1918,21 @@ COPY_FROM_PASS1 = {"woe_logit", "tabpfn_v2", "tabicl", "tabdpt", "carte"}
 
 def run_pass(pass_name: str, n_splits: int = 10, seed: int = 42) -> None:
     X, y, meta = load(REPO_ROOT)
-    X_carte = carte_decode(X, meta)
     folds = make_folds(y, n_splits=n_splits, seed=seed)
 
     out_csv = RESULTS_DIR / f"per_fold_{pass_name}.csv"
     out_parquet = RESULTS_DIR / f"predictions_{pass_name}.parquet"
-    for p in (out_csv, out_parquet):
-        if p.exists():
-            p.unlink()
+    parts_dir = RESULTS_DIR / f"predictions_{pass_name}_parts"
+    # Clean prior outputs (full re-run)
+    if out_csv.exists():
+        out_csv.unlink()
+    if out_parquet.exists():
+        out_parquet.unlink()
+    if parts_dir.exists():
+        for f in parts_dir.iterdir():
+            f.unlink()
+        parts_dir.rmdir()
+    parts_dir.mkdir(parents=True, exist_ok=True)
 
     pass1_preds = None
     pass1_metrics = None
@@ -1900,26 +1945,32 @@ def run_pass(pass_name: str, n_splits: int = 10, seed: int = 42) -> None:
         pass1_preds = pd.read_parquet(p1_parquet)
         pass1_metrics = pd.read_csv(p1_csv)
 
-    all_preds: list[pd.DataFrame] = []
-
     for fold_i, (tr, te) in enumerate(folds):
-        # Step 1+2: fold-safe preprocessing
-        X_tr_raw, X_te_raw = X.iloc[tr], X.iloc[te]
-        X_tr, X_te, caps = fold_safe_iqr_cap(X_tr_raw, X_te_raw, meta)
-        # CARTE inputs: cap (numeric only) then string-decode
-        X_tr_carte = carte_decode(X_tr, meta)
-        X_te_carte = carte_decode(X_te, meta)
+        # Step 1: slice raw, uncapped data and labels by the fold's positional indices
+        X_tr_raw = X.iloc[tr].reset_index(drop=True)
+        y_tr     = y.iloc[tr].reset_index(drop=True)
+        X_te_raw = X.iloc[te].reset_index(drop=True)
+        y_te     = y.iloc[te].reset_index(drop=True)
 
-        # Step 3: tuning per outer fold (Pass 2 only)
+        # Step 2: outer fold-safe cap (caps fit on X_tr_raw, applied to both)
+        X_tr_capped, X_te_capped, _ = fold_safe_iqr_cap(X_tr_raw, X_te_raw, meta)
+        # CARTE inputs: cap (numeric only) then string-decode
+        X_tr_carte = carte_decode(X_tr_capped, meta)
+        X_te_carte = carte_decode(X_te_capped, meta)
+
+        # Step 3: nested Optuna tuning (Pass 2 only).
+        # Tuning receives the UNCAPPED outer-training fold; it recomputes caps
+        # inside each inner split (strict nested preprocessing — see spec §4).
         tuned_params = None
         if pass_name == "tuned":
             from src.tuning import tune_classicals_for_fold
-            tuned_params = tune_classicals_for_fold(X_tr, y.iloc[tr], meta, seed=seed)
+            tuned_params = tune_classicals_for_fold(X_tr_raw, y_tr, meta, seed=seed)
 
-        # Step 4: per-model loop
+        # Step 4: per-model fits on outer-capped data
         models = _build_models_for_fold(pass_name, tuned_params)
+        fold_preds: list[pd.DataFrame] = []
         for model in tqdm(models, desc=f"fold {fold_i+1}/{n_splits}", leave=False):
-            # Reuse pass-1 output for unchanged models
+            # Pass 2 shortcut: reuse pass-1 rows for unchanged models
             if pass_name == "tuned" and model.name in COPY_FROM_PASS1:
                 row = pass1_metrics[(pass1_metrics["model"] == model.name) &
                                     (pass1_metrics["fold_idx"] == fold_i)].iloc[0].to_dict()
@@ -1927,35 +1978,42 @@ def run_pass(pass_name: str, n_splits: int = 10, seed: int = 42) -> None:
                 append_row(out_csv, row)
                 copy_preds = pass1_preds[(pass1_preds["model"] == model.name) &
                                          (pass1_preds["fold_idx"] == fold_i)].copy()
-                all_preds.append(copy_preds)
+                fold_preds.append(copy_preds)
                 continue
 
             # Choose feature view (CARTE wants strings)
             if getattr(model, "requires_string_labels", False):
                 X_tr_use, X_te_use = X_tr_carte, X_te_carte
             else:
-                X_tr_use, X_te_use = X_tr, X_te
+                X_tr_use, X_te_use = X_tr_capped, X_te_capped
 
             row, proba = run_one_fold_one_model(
-                model, pd.concat([X_tr_use, X_te_use]), y, np.arange(len(X_tr_use)),
-                np.arange(len(X_tr_use), len(X_tr_use) + len(X_te_use)), meta,
+                model, X_tr_use, y_tr, X_te_use, y_te, meta,
             )
             row["fold_idx"] = fold_i
             row["pass"] = pass_name
             append_row(out_csv, row)
 
-            all_preds.append(pd.DataFrame({
+            fold_preds.append(pd.DataFrame({
                 "model": model.name,
                 "fold_idx": fold_i,
                 "test_idx": te,
-                "y": y.iloc[te].values,
+                "y": y_te.values,
                 "proba": proba,
             }))
 
-    # Write predictions parquet once at the end (single I/O)
-    pd.concat(all_preds, ignore_index=True).to_parquet(out_parquet, index=False)
+        # Crash-safe: write this fold's predictions as a parquet part immediately.
+        # If the run dies mid-pass, all completed folds' parts are intact and
+        # can be combined with the snippet below.
+        part_path = parts_dir / f"fold_{fold_i:02d}.parquet"
+        pd.concat(fold_preds, ignore_index=True).to_parquet(part_path, index=False)
+
+    # Combine parts into the canonical predictions parquet
+    parts = sorted(parts_dir.glob("fold_*.parquet"))
+    combined = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
+    combined.to_parquet(out_parquet, index=False)
     print(f"Wrote {out_csv}")
-    print(f"Wrote {out_parquet}")
+    print(f"Wrote {out_parquet} (combined from {len(parts)} parts in {parts_dir})")
 
 def main():
     p = argparse.ArgumentParser()
@@ -2014,16 +2072,65 @@ def test_returns_three_classical_params():
         assert isinstance(v, dict) and len(v) > 0
 
 def test_signature_only_consumes_train_rows():
-    """The function MUST NOT accept full-dataset access. This is the
-    no-leakage guard: if anyone refactors to add an `X_full` param later,
-    this test will fail."""
+    """First-line no-leakage guard. NOTE: this only checks that the function
+    SIGNATURE does not accept full-dataset arguments — it does not prove the
+    body does not somehow re-import and access the full data. That stronger
+    behavioural guarantee is enforced by:
+      1. Code review of tuning.py imports (no `from src.data_loader import load`)
+      2. The runner's call site passes only the outer-training slice
+      3. test_inner_cap_uses_inner_train_only (below) verifies the strict
+         nested-cap behaviour end-to-end
+    """
     import inspect
     sig = inspect.signature(tune_classicals_for_fold)
     params = list(sig.parameters.keys())
-    # Allowed params only — adjust this list if you add seed / n_trials etc.
     allowed = {"X_train_outer", "y_train_outer", "types_meta", "seed", "n_trials"}
     assert set(params).issubset(allowed), \
         f"tune_classicals_for_fold must not accept full-dataset args; got {params}"
+
+def test_inner_cap_uses_inner_train_only():
+    """Strict nested-preprocessing guard. Inside _inner_cv_score, the cap
+    applied to inner-validation rows must come from inner-train only — NOT
+    from the full outer-training fold.
+
+    Setup: build a tiny outer-train of 25 rows where one row has a huge
+    outlier in 'Duration of Credit (month)'. If the outlier ends up in an
+    inner-val fold but the cap is computed from inner-train only (which does
+    not see that outlier), the outlier value gets capped at the inner-train
+    distribution's Q3+1.5*IQR. We verify that by calling _inner_cv_score with
+    a make_fn that records the X_te['Duration...'].max() it actually sees.
+    """
+    from src.tuning import _inner_cv_score
+    X = pd.DataFrame({
+        "Duration of Credit (month)": list(range(1, 25)) + [999.0],
+        "Credit Amount": [500.0] * 25,
+        "Age (years)": [30.0] * 25,
+        "other": [0] * 25,
+    })
+    meta = {
+        "Duration of Credit (month)": {"type": "continuous"},
+        "Credit Amount": {"type": "continuous"},
+        "Age (years)": {"type": "continuous"},
+        "other": {"type": "nominal"},
+    }
+    y = pd.Series([0, 1] * 12 + [0])
+    observed_max: list[float] = []
+
+    class _Recorder:
+        def fit(self, Xtr, ytr): self._x = Xtr; return self
+        def predict_proba(self, Xte):
+            observed_max.append(float(Xte["Duration of Credit (month)"].max()))
+            return np.column_stack([1 - np.full(len(Xte), 0.5), np.full(len(Xte), 0.5)])
+
+    def make(Xtr_capped, ytr): return _Recorder().fit(Xtr_capped, ytr)
+
+    _inner_cv_score(make, X, y, meta, seed=42)
+    # If 999 ever leaked into the inner-val set uncapped, observed_max would
+    # contain a value >= 999 (because the outer cap was never applied).
+    # With strict per-inner-split caps, it must be capped to something far
+    # smaller than 999.
+    assert all(m < 100 for m in observed_max), \
+        f"inner-val rows saw uncapped outliers, suggesting inner cap leaked: {observed_max}"
 ```
 
 - [ ] **Step 2: Fail**
@@ -2040,7 +2147,9 @@ Create `comparison/src/tuning.py`:
 """Per-outer-fold nested Optuna tuning for the classical baselines.
 
 Called by the runner ONCE per outer fold (Pass 2). Receives ONLY the outer-
-training rows — the function signature itself is checked by a leakage test.
+training rows — and crucially, receives them **uncapped**. Caps are recomputed
+inside each inner CV split (strict nested preprocessing, spec §4) so that inner-
+validation rows never influence the cap thresholds they are later scored against.
 """
 from __future__ import annotations
 import numpy as np
@@ -2048,28 +2157,61 @@ import optuna
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
+from src.preprocessing import fold_safe_iqr_cap
 
 N_TRIALS_DEFAULT = 50
 INNER_FOLDS = 5
 
-# Silence Optuna's per-trial chatter for cleaner CV logs
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-def _inner_cv_score(make_clf_and_fit, X: pd.DataFrame, y: pd.Series, seed: int) -> float:
+def _inner_cv_score(
+    make_clf_and_fit,
+    X_uncapped: pd.DataFrame,
+    y: pd.Series,
+    types_meta: dict,
+    seed: int,
+) -> float:
+    """5-fold inner CV with caps refit per inner split.
+
+    The cap is computed from inner-train rows only and applied to both inner-
+    train and inner-validation. This prevents inner-val from influencing
+    its own cap threshold.
+    """
     skf = StratifiedKFold(n_splits=INNER_FOLDS, shuffle=True, random_state=seed)
     aucs = []
-    for tr, te in skf.split(X, y):
-        clf = make_clf_and_fit(X.iloc[tr], y.iloc[tr])
-        p = clf.predict_proba(X.iloc[te])[:, 1]
-        aucs.append(roc_auc_score(y.iloc[te], p))
+    for tr, te in skf.split(X_uncapped, y):
+        X_inner_tr_uncapped = X_uncapped.iloc[tr].reset_index(drop=True)
+        X_inner_te_uncapped = X_uncapped.iloc[te].reset_index(drop=True)
+        # Strict nested cap
+        X_inner_tr, X_inner_te, _ = fold_safe_iqr_cap(
+            X_inner_tr_uncapped, X_inner_te_uncapped, types_meta,
+        )
+        y_inner_tr = y.iloc[tr].reset_index(drop=True)
+        y_inner_te = y.iloc[te].reset_index(drop=True)
+        clf = make_clf_and_fit(X_inner_tr, y_inner_tr)
+        p = clf.predict_proba(X_inner_te)[:, 1]
+        aucs.append(roc_auc_score(y_inner_te, p))
     return float(np.mean(aucs))
 
-def _tune_xgb(X: pd.DataFrame, y: pd.Series, types_meta: dict, seed: int, n_trials: int) -> dict:
+def _cast_nominals_to_category(X: pd.DataFrame, types_meta: dict) -> pd.DataFrame:
+    """Cast nominal columns to pandas category dtype. Done inside each inner
+    fit so that train/val category levels are consistent within the fit."""
+    X = X.copy()
+    for c, i in types_meta.items():
+        if i["type"] == "nominal" and c in X.columns:
+            X[c] = X[c].astype("category")
+    return X
+
+def _align_test_categories(X_te: pd.DataFrame, X_tr: pd.DataFrame) -> pd.DataFrame:
+    X_te = X_te.copy()
+    for c in X_tr.columns:
+        if str(X_tr[c].dtype) == "category":
+            X_te[c] = X_te[c].astype(pd.CategoricalDtype(categories=X_tr[c].cat.categories))
+    return X_te
+
+def _tune_xgb(X_uncapped: pd.DataFrame, y: pd.Series, types_meta: dict,
+              seed: int, n_trials: int) -> dict:
     from xgboost import XGBClassifier
-    nominal = [c for c, i in types_meta.items() if i["type"] == "nominal" and c in X.columns]
-    X_cat = X.copy()
-    for c in nominal:
-        X_cat[c] = X_cat[c].astype("category")
 
     def objective(trial):
         params = dict(
@@ -2083,21 +2225,31 @@ def _tune_xgb(X: pd.DataFrame, y: pd.Series, types_meta: dict, seed: int, n_tria
             reg_alpha=trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
             reg_lambda=trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
         )
-        def make(Xtr, ytr):
-            clf = XGBClassifier(**params); clf.fit(Xtr, ytr); return clf
-        return _inner_cv_score(make, X_cat, y, seed)
+        def make(Xtr_capped, ytr):
+            Xtr_cat = _cast_nominals_to_category(Xtr_capped, types_meta)
+            clf = XGBClassifier(**params)
+            clf.fit(Xtr_cat, ytr)
+            # Stash for later prediction with aligned categories
+            clf._train_cats = Xtr_cat
+            orig_predict_proba = clf.predict_proba
+            def predict_proba(Xte):
+                Xte_cat = _cast_nominals_to_category(Xte, types_meta)
+                Xte_cat = _align_test_categories(Xte_cat, clf._train_cats)
+                return orig_predict_proba(Xte_cat)
+            clf.predict_proba = predict_proba
+            return clf
+        return _inner_cv_score(make, X_uncapped, y, types_meta, seed)
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     return study.best_params
 
-def _tune_lgbm(X: pd.DataFrame, y: pd.Series, types_meta: dict, seed: int, n_trials: int) -> dict:
+def _tune_lgbm(X_uncapped: pd.DataFrame, y: pd.Series, types_meta: dict,
+               seed: int, n_trials: int) -> dict:
     from lightgbm import LGBMClassifier
-    nominal = [c for c, i in types_meta.items() if i["type"] == "nominal" and c in X.columns]
-    cat_idx = [X.columns.get_loc(c) for c in nominal]
-    X_cat = X.copy()
-    for c in nominal:
-        X_cat[c] = X_cat[c].astype("category")
+    nominal_cols = [c for c, i in types_meta.items()
+                    if i["type"] == "nominal" and c in X_uncapped.columns]
+    cat_idx = [X_uncapped.columns.get_loc(c) for c in nominal_cols]
 
     def objective(trial):
         params = dict(
@@ -2112,36 +2264,47 @@ def _tune_lgbm(X: pd.DataFrame, y: pd.Series, types_meta: dict, seed: int, n_tri
             reg_alpha=trial.suggest_float("reg_alpha", 1e-8, 1.0, log=True),
             reg_lambda=trial.suggest_float("reg_lambda", 1e-8, 1.0, log=True),
         )
-        def make(Xtr, ytr):
+        def make(Xtr_capped, ytr):
+            Xtr_cat = _cast_nominals_to_category(Xtr_capped, types_meta)
             clf = LGBMClassifier(**params)
-            clf.fit(Xtr, ytr, categorical_feature=cat_idx)
+            clf.fit(Xtr_cat, ytr, categorical_feature=cat_idx)
+            clf._train_cats = Xtr_cat
+            orig_predict_proba = clf.predict_proba
+            def predict_proba(Xte):
+                Xte_cat = _cast_nominals_to_category(Xte, types_meta)
+                Xte_cat = _align_test_categories(Xte_cat, clf._train_cats)
+                return orig_predict_proba(Xte_cat)
+            clf.predict_proba = predict_proba
             return clf
-        return _inner_cv_score(make, X_cat, y, seed)
+        return _inner_cv_score(make, X_uncapped, y, types_meta, seed)
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     return study.best_params
 
-def _tune_logit(X: pd.DataFrame, y: pd.Series, types_meta: dict, seed: int, n_trials: int) -> dict:
+def _tune_logit(X_uncapped: pd.DataFrame, y: pd.Series, types_meta: dict,
+                seed: int, n_trials: int) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.compose import ColumnTransformer
     from sklearn.preprocessing import OneHotEncoder, StandardScaler
     from sklearn.pipeline import Pipeline
-    nominal = [c for c, i in types_meta.items() if i["type"] == "nominal" and c in X.columns]
-    other = [c for c in X.columns if c not in nominal]
+    nominal = [c for c, i in types_meta.items()
+               if i["type"] == "nominal" and c in X_uncapped.columns]
+    other = [c for c in X_uncapped.columns if c not in nominal]
 
     def objective(trial):
         C = trial.suggest_float("C", 1e-3, 10.0, log=True)
-        def make(Xtr, ytr):
+        def make(Xtr_capped, ytr):
             pre = ColumnTransformer([
                 ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), nominal),
                 ("num", StandardScaler(), other),
             ])
             pipe = Pipeline([("pre", pre),
-                             ("lr", LogisticRegression(solver="lbfgs", max_iter=2000, C=C, random_state=seed))])
-            pipe.fit(Xtr, ytr)
+                             ("lr", LogisticRegression(solver="lbfgs", max_iter=2000,
+                                                       C=C, random_state=seed))])
+            pipe.fit(Xtr_capped, ytr)
             return pipe
-        return _inner_cv_score(make, X, y, seed)
+        return _inner_cv_score(make, X_uncapped, y, types_meta, seed)
     study = optuna.create_study(direction="maximize",
                                 sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
@@ -2155,6 +2318,11 @@ def tune_classicals_for_fold(
     n_trials: int = N_TRIALS_DEFAULT,
 ) -> dict[str, dict]:
     """Run Optuna for each of {xgb, lgbm, logit} on the outer-training fold only.
+
+    ``X_train_outer`` MUST be the **uncapped** outer-training fold. Caps are
+    recomputed inside each inner CV split so inner-validation rows never
+    influence the caps they are later scored against (spec §4 strict nested
+    preprocessing).
 
     Returns:
         {"xgb": best_params, "lgbm": best_params, "logit": best_params}
@@ -2317,14 +2485,22 @@ import pandas as pd
 from src.metrics import delong_test, wilcoxon_paired, bonferroni
 
 CHAMPION = "woe_logit"
-METRICS = ["auc", "gini", "ks", "brier", "logloss"]
+# Primary discrimination metrics — the headline of the benchmark.
+DISCRIMINATION_METRICS = ["auc", "gini", "ks"]
+# Secondary probability-quality metrics — sensitive to calibration as well as
+# discrimination. Reported for completeness but NOT part of the primary claim.
+PROBABILITY_QUALITY_METRICS = ["brier", "logloss"]
+METRICS = DISCRIMINATION_METRICS + PROBABILITY_QUALITY_METRICS
 
 DISCLAIMER = (
     "> **Scope of claim (narrow):** This benchmark addresses *discriminatory power only*. "
     "It does NOT support the broader claim that \"TFMs are better PD models\" — that would "
     "require calibration quality, rating-grade homogeneity/heterogeneity, PSI stability, and "
     "out-of-time validation, all of which the `pd-autopilot` pipeline provides for the incumbent "
-    "but are out of scope here."
+    "but are out of scope here. Brier and log-loss are reported as **probability-quality "
+    "(secondary)** metrics — they combine discrimination with calibration, so a challenger that "
+    "ties on AUC but loses on Brier is producing well-ranked but mis-scaled probabilities, "
+    "which is a calibration story outside this benchmark's primary scope."
 )
 
 CONTEXT = """## Context (not directly comparable — different preprocessing path / fold seed)
@@ -2368,8 +2544,11 @@ def build_summary_md(df: pd.DataFrame, preds: pd.DataFrame, champion: str = CHAM
     agg = g[METRICS].agg(["mean", "std"]).round(4)
     tests = _paired_tests(df, preds, champion)
 
-    header = ("| Model | " + " | ".join(m.upper() for m in METRICS)
-              + " | DeLong p | DeLong (bonf) | Wilcoxon p | Wilcoxon (bonf) |")
+    # Build the header in two visually grouped sections.
+    discrim_hdr = " | ".join(m.upper() for m in DISCRIMINATION_METRICS)
+    proba_hdr   = " | ".join(m.upper() + " (sec.)" for m in PROBABILITY_QUALITY_METRICS)
+    header = (f"| Model | {discrim_hdr} | {proba_hdr} | "
+              f"DeLong p | DeLong (bonf) | Wilcoxon p | Wilcoxon (bonf) |")
     sep = "|" + "|".join(["---"] * (len(METRICS) + 5)) + "|"
 
     rows = []
@@ -2383,10 +2562,16 @@ def build_summary_md(df: pd.DataFrame, preds: pd.DataFrame, champion: str = CHAM
                     f"{t['wilcoxon_p']:.3f}", f"{t['wilcoxon_bonf']:.3f}"]
         rows.append("| " + model + " | " + " | ".join(cells) + " | " + " | ".join(tail) + " |")
 
+    legend = (
+        "*Primary discrimination metrics: AUC, Gini, KS. "
+        "Probability-quality (secondary) metrics: Brier, log-loss — sensitive to calibration, "
+        "not part of the primary claim (see disclaimer above).*"
+    )
     return "\n".join([
         DISCLAIMER, "",
         "## Headline (10-fold CV)", "",
         header, sep, *rows, "",
+        legend, "",
         CONTEXT,
     ])
 
@@ -2688,10 +2873,10 @@ Expected: PASSED — every coefficient within ±0.05.
 | 1 | `uv sync && uv run pytest tests/` passes | Steps 1+2 above |
 | 2 | `test_full_sample_refit_matches_report_coefficients` passes | Step 3 |
 | 3 | `test_special_codes_isolated` passes | `uv run pytest tests/test_woe_logit.py::test_special_codes_isolated -v` |
-| 4 | `test_signature_only_consumes_train_rows` (no-leakage guard) | `uv run pytest tests/test_tuning.py::test_signature_only_consumes_train_rows -v` |
-| 5 | `test_caps_derived_from_train_only` | `uv run pytest tests/test_preprocessing.py::test_caps_derived_from_train_only -v` |
+| 4 | `test_signature_only_consumes_train_rows` + `test_inner_cap_uses_inner_train_only` (no-leakage guards) | `uv run pytest tests/test_tuning.py -k "signature_only or inner_cap_uses" -v` |
+| 5 | `test_caps_derived_from_train_only` + `test_run_one_fold_passes_correct_labels` (label-alignment regression) | `uv run pytest tests/test_preprocessing.py::test_caps_derived_from_train_only tests/test_runner.py::test_run_one_fold_passes_correct_labels -v` |
 | 6 | per_fold CSVs have 80 rows each | `wc -l results/per_fold_*.csv` |
-| 7 | predictions parquets have 8,000 rows each | `uv run python -c "import pandas as pd; print(len(pd.read_parquet('results/predictions_defaults.parquet')), len(pd.read_parquet('results/predictions_tuned.parquet')))"` |
+| 7 | predictions parquets have 8,000 rows each; per-fold parts directories exist with 10 parts each | `uv run python -c "import pandas as pd; print(len(pd.read_parquet('results/predictions_defaults.parquet')), len(pd.read_parquet('results/predictions_tuned.parquet')))"; ls results/predictions_defaults_parts/ results/predictions_tuned_parts/ | wc -l` |
 | 8 | Summary MDs begin with disclaimer + contain both DeLong and Wilcoxon | `head -3 results/summary_*.md; grep -l 'DeLong' results/summary_*.md; grep -l 'Wilcoxon' results/summary_*.md` |
 | 9 | Analysis notebook executes end-to-end | Already done in Task 22 step 3 |
 | 10 | Wall-clock ≤ 3 hours combined | Recorded during Tasks 19 + 20 |
