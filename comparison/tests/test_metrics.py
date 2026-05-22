@@ -23,3 +23,21 @@ def test_logloss_clipping():
     p = np.array([1.0, 0.0])
     m = compute_all(y, p)
     assert np.isfinite(m["logloss"])
+
+from src.metrics import delong_test
+
+def test_delong_identical_returns_high_p():
+    rng = np.random.default_rng(1)
+    y = rng.integers(0, 2, 300)
+    p = rng.random(300)
+    z, pval = delong_test(y, p, p)
+    assert abs(z) < 1e-6
+    assert pval > 0.99
+
+def test_delong_better_model_significant():
+    rng = np.random.default_rng(2)
+    y = rng.integers(0, 2, 500)
+    p_bad = rng.random(500)
+    p_good = y + rng.normal(0, 0.3, 500)
+    z, pval = delong_test(y, p_bad, p_good)
+    assert pval < 0.01
