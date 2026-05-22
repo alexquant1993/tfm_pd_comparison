@@ -1,7 +1,7 @@
 [project]
 name = "comparison"
 version = "0.1.0"
-description = "Add your description here"
+description = "Benchmark 4 tabular foundation models against the pd-autopilot WoE-logit champion on German Credit."
 requires-python = ">=3.12"
 dependencies = [
     "ipykernel>=7.2.0",
