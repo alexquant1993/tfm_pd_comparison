@@ -20,6 +20,14 @@
 - v1 Task 21 (retrofit predictions persistence) deleted — rolled into v2 Task 17.
 - Acceptance criteria expanded to 10 items, each tied to a named test or artefact.
 
+**Additional changes (Codex round-3):**
+- **Inner-cap test rewritten with monkeypatch** (Task 18): the previous `observed_max < 100` assertion would have passed under leaky mode too (full-outer-fold cap would still squash 999 to <100). The new `test_inner_cap_uses_inner_train_only` monkeypatches `src.tuning.fold_safe_iqr_cap` and asserts every inner-fold call receives exactly the 80-row inner-train slice (4/5 of a 100-row outer-train fixture), proving the strict-nested protocol.
+- **Tuning smoke test now passes uncapped data** (Task 18): `test_returns_three_classical_params` had been calling `fold_safe_iqr_cap` before `tune_classicals_for_fold`, violating the new uncapped-contract documented in the function's docstring. Fixed.
+- **Summary hard-asserts prediction alignment** (Task 21): `_paired_tests` now raises `AssertionError` if any challenger's sorted `(fold_idx, test_idx, y)` differs from the champion's — preventing silently-wrong DeLong p-values from a misaligned predictions parquet. The unit-test fixture now shares `y` across models (proving the check accepts aligned data) and a new `test_alignment_check_rejects_misaligned_predictions` corrupts one y-value and asserts the build raises.
+- **Spec §1 research question** narrowed to AUC/Gini/KS only (Brier/log-loss explicitly secondary).
+- **Task 18 Step 4** now runs the strict-nested-cap test inline (was deferred to acceptance).
+- **Artefact counts use Python/find** (Task 24) instead of `wc -l` on CSVs (which over-counts by 1 for the header) and `ls | wc -l` on parts dirs (which is fragile with `ls` formatting).
+
 **Additional changes (Codex round-2):**
 - **CRITICAL bug fix in Task 17 runner:** old `run_one_fold_one_model` accepted full-dataset `(X, y, train_idx, test_idx)` and called `y.iloc[train_idx]` with locally-built `np.arange(...)` indices, silently scoring against the first N rows of the full `y` rather than the fold's labels. Every metric after fold 0 would have been invalid. v2 takes already-sliced `(X_train, y_train, X_test, y_test)` and a regression test (`test_run_one_fold_passes_correct_labels`) guards against recurrence.
 - **Crash-safe parquet** (Task 17): predictions are now written as per-fold parts to `results/predictions_<pass>_parts/fold_NN.parquet` immediately after each fold completes, then combined into the canonical parquet at the end. A mid-pass crash leaves completed folds intact and recoverable.
@@ -2057,16 +2065,19 @@ import numpy as np
 import pandas as pd
 import pytest
 from src.data_loader import load
-from src.preprocessing import fold_safe_iqr_cap
 from src.tuning import tune_classicals_for_fold
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.mark.slow
 def test_returns_three_classical_params():
+    # Contract (spec §4): tune_classicals_for_fold receives the UNCAPPED
+    # outer-training fold. Caps are applied inside each inner CV split.
     X, y, meta = load(repo_root=REPO_ROOT)
-    X_tr, _, _ = fold_safe_iqr_cap(X.iloc[:800], X.iloc[800:], meta)
-    params = tune_classicals_for_fold(X_tr, y.iloc[:800], meta, seed=42, n_trials=3)
+    X_tr_outer_uncapped = X.iloc[:800].reset_index(drop=True)
+    y_tr_outer          = y.iloc[:800].reset_index(drop=True)
+    params = tune_classicals_for_fold(X_tr_outer_uncapped, y_tr_outer, meta,
+                                      seed=42, n_trials=3)
     assert set(params.keys()) == {"xgb", "lgbm", "logit"}
     for v in params.values():
         assert isinstance(v, dict) and len(v) > 0
@@ -2088,24 +2099,38 @@ def test_signature_only_consumes_train_rows():
     assert set(params).issubset(allowed), \
         f"tune_classicals_for_fold must not accept full-dataset args; got {params}"
 
-def test_inner_cap_uses_inner_train_only():
-    """Strict nested-preprocessing guard. Inside _inner_cv_score, the cap
-    applied to inner-validation rows must come from inner-train only — NOT
-    from the full outer-training fold.
+def test_inner_cap_uses_inner_train_only(monkeypatch):
+    """Strict nested-preprocessing guard, monkeypatch edition.
 
-    Setup: build a tiny outer-train of 25 rows where one row has a huge
-    outlier in 'Duration of Credit (month)'. If the outlier ends up in an
-    inner-val fold but the cap is computed from inner-train only (which does
-    not see that outlier), the outlier value gets capped at the inner-train
-    distribution's Q3+1.5*IQR. We verify that by calling _inner_cv_score with
-    a make_fn that records the X_te['Duration...'].max() it actually sees.
+    The previous version (`assert observed_max < 100`) was weak — even the
+    LEAKY mode (caps fit on full outer-training fold including the inner-val
+    rows) would still squash the 999 outlier below 100, so that assertion
+    couldn't distinguish strict from leaky behaviour.
+
+    This version monkeypatches the `fold_safe_iqr_cap` symbol used inside
+    `src.tuning` and records the exact `X_train` argument of every call.
+    For each inner-CV split, we assert the captured DataFrame's row count
+    equals the inner-train size (4/5 of outer-train), NOT the full outer-
+    train size. If anyone reintroduces full-outer-fold capping, the captured
+    row count would be the full outer size and this test would fail loudly.
     """
+    import src.tuning as tuning_mod
+    real_cap = tuning_mod.fold_safe_iqr_cap
+    seen_train_lens: list[int] = []
+
+    def spy(X_train, X_test, types_meta):
+        seen_train_lens.append(len(X_train))
+        return real_cap(X_train, X_test, types_meta)
+
+    monkeypatch.setattr(tuning_mod, "fold_safe_iqr_cap", spy)
+
     from src.tuning import _inner_cv_score
+    rng = np.random.default_rng(0)
     X = pd.DataFrame({
-        "Duration of Credit (month)": list(range(1, 25)) + [999.0],
-        "Credit Amount": [500.0] * 25,
-        "Age (years)": [30.0] * 25,
-        "other": [0] * 25,
+        "Duration of Credit (month)": rng.uniform(4, 60, 100),
+        "Credit Amount": rng.uniform(100, 5000, 100),
+        "Age (years)": rng.uniform(19, 70, 100),
+        "other": rng.integers(0, 3, 100),
     })
     meta = {
         "Duration of Credit (month)": {"type": "continuous"},
@@ -2113,24 +2138,23 @@ def test_inner_cap_uses_inner_train_only():
         "Age (years)": {"type": "continuous"},
         "other": {"type": "nominal"},
     }
-    y = pd.Series([0, 1] * 12 + [0])
-    observed_max: list[float] = []
+    y = pd.Series([0, 1] * 50)
 
-    class _Recorder:
-        def fit(self, Xtr, ytr): self._x = Xtr; return self
+    class _Stub:
+        def fit(self, Xtr, ytr): return self
         def predict_proba(self, Xte):
-            observed_max.append(float(Xte["Duration of Credit (month)"].max()))
-            return np.column_stack([1 - np.full(len(Xte), 0.5), np.full(len(Xte), 0.5)])
+            return np.column_stack([np.full(len(Xte), 0.5), np.full(len(Xte), 0.5)])
 
-    def make(Xtr_capped, ytr): return _Recorder().fit(Xtr_capped, ytr)
+    def make(Xtr_capped, ytr): return _Stub().fit(Xtr_capped, ytr)
 
     _inner_cv_score(make, X, y, meta, seed=42)
-    # If 999 ever leaked into the inner-val set uncapped, observed_max would
-    # contain a value >= 999 (because the outer cap was never applied).
-    # With strict per-inner-split caps, it must be capped to something far
-    # smaller than 999.
-    assert all(m < 100 for m in observed_max), \
-        f"inner-val rows saw uncapped outliers, suggesting inner cap leaked: {observed_max}"
+
+    # INNER_FOLDS = 5 → 5 calls to fold_safe_iqr_cap, each with
+    # an inner-train of 80 rows (4/5 of 100). NOT 100.
+    assert len(seen_train_lens) == 5, \
+        f"expected 5 inner-fold cap calls, got {len(seen_train_lens)}"
+    assert all(n == 80 for n in seen_train_lens), \
+        f"inner-cap leakage: cap was fit on {seen_train_lens} rows (expected all=80)"
 ```
 
 - [ ] **Step 2: Fail**
@@ -2334,12 +2358,14 @@ def tune_classicals_for_fold(
     }
 ```
 
-- [ ] **Step 4: Pass**
+- [ ] **Step 4: Pass — including the strict-nested-cap behavioural guard**
 
 ```bash
 cd comparison && uv run pytest tests/test_tuning.py -v -m slow
 cd comparison && uv run pytest tests/test_tuning.py::test_signature_only_consumes_train_rows -v
+cd comparison && uv run pytest tests/test_tuning.py::test_inner_cap_uses_inner_train_only -v
 ```
+The third command is the strict-nested-cap guard — it monkeypatches `fold_safe_iqr_cap` and asserts every inner-fold call sees exactly the inner-train slice (not the full outer fold). If the test fails, the inner CV is leaking and tuning results would be optimistically biased.
 
 - [ ] **Step 5: Commit**
 
@@ -2440,9 +2466,16 @@ Create `comparison/tests/test_summary.py`:
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import pytest
 from src.summary import build_summary_md, DISCLAIMER
 
 def _fake_inputs():
+    """Build aligned inputs: SAME y per (fold_idx, test_idx) across models.
+
+    The alignment is what the production parquet must guarantee, so the
+    fixture must mirror it — otherwise the unit test would silently accept
+    a broken alignment check.
+    """
     df = pd.DataFrame({
         "model": ["woe_logit"] * 10 + ["xgb"] * 10,
         "fold_idx": list(range(10)) * 2,
@@ -2450,12 +2483,18 @@ def _fake_inputs():
         "gini": 0.6, "ks": 0.5, "brier": 0.17, "logloss": 0.5, "runtime_s": 1.0,
     })
     rng = np.random.default_rng(0)
+    # Generate y ONCE per (fold, test_idx); reuse for every model.
+    base = []
+    for f in range(10):
+        for i in range(100):
+            base.append({"fold_idx": f, "test_idx": f * 100 + i,
+                         "y": int(rng.integers(0, 2))})
+    base_df = pd.DataFrame(base)
     rows = []
     for m in ["woe_logit", "xgb"]:
-        for f in range(10):
-            for i in range(100):
-                rows.append({"model": m, "fold_idx": f, "test_idx": f * 100 + i,
-                             "y": rng.integers(0, 2), "proba": rng.random()})
+        for _, b in base_df.iterrows():
+            rows.append({"model": m, "fold_idx": b["fold_idx"], "test_idx": b["test_idx"],
+                         "y": b["y"], "proba": float(rng.random())})
     preds = pd.DataFrame(rows)
     return df, preds
 
@@ -2465,6 +2504,17 @@ def test_build_summary_includes_disclaimer():
     assert DISCLAIMER in md
     assert "woe_logit" in md and "xgb" in md
     assert "DeLong" in md and "Wilcoxon" in md
+
+def test_alignment_check_rejects_misaligned_predictions():
+    """If the predictions parquet is misaligned (challenger has different y
+    for some (fold, test_idx) than the champion), summary must REFUSE to
+    compute DeLong — silent miscalculation would be worse than no test."""
+    df, preds = _fake_inputs()
+    # Corrupt xgb's y for one row only
+    mask = (preds["model"] == "xgb") & (preds["fold_idx"] == 0) & (preds["test_idx"] == 0)
+    preds.loc[mask, "y"] = 1 - preds.loc[mask, "y"]
+    with pytest.raises(AssertionError, match="misaligned"):
+        build_summary_md(df, preds, champion="woe_logit")
 ```
 
 - [ ] **Step 2: Fail**
@@ -2510,20 +2560,35 @@ CONTEXT = """## Context (not directly comparable — different preprocessing pat
 """
 
 def _paired_tests(df: pd.DataFrame, preds: pd.DataFrame, champion: str) -> dict[str, dict]:
-    """For each non-champion model, compute DeLong and Wilcoxon p-values."""
+    """For each non-champion model, compute DeLong and Wilcoxon p-values.
+
+    Critical: the predictions parquet must be aligned across models — same
+    (fold_idx, test_idx) rows with identical y labels for each model. We
+    assert that explicitly before running DeLong; a misaligned parquet would
+    otherwise produce silently-wrong p-values.
+    """
     models = list(df["model"].unique())
     n_comp = sum(1 for m in models if m != champion)
 
-    ch_preds = preds[preds.model == champion].sort_values(["fold_idx", "test_idx"])
+    ch_preds = preds[preds.model == champion].sort_values(["fold_idx", "test_idx"]).reset_index(drop=True)
     y_all = ch_preds["y"].values
     p_ch = ch_preds["proba"].values
+    ch_keys = ch_preds[["fold_idx", "test_idx", "y"]].values
     ch_aucs = df[df.model == champion].sort_values("fold_idx")["auc"].values
 
     out: dict[str, dict] = {}
     for m in models:
         if m == champion:
             continue
-        m_preds = preds[preds.model == m].sort_values(["fold_idx", "test_idx"])
+        m_preds = preds[preds.model == m].sort_values(["fold_idx", "test_idx"]).reset_index(drop=True)
+        m_keys = m_preds[["fold_idx", "test_idx", "y"]].values
+        # Hard alignment check — DeLong silently misreports if labels are off.
+        if not np.array_equal(ch_keys, m_keys):
+            raise AssertionError(
+                f"predictions parquet misaligned: model={m} has different "
+                f"(fold_idx, test_idx, y) rows than champion={champion}. "
+                f"DeLong would be invalid. Inspect predictions_*.parquet."
+            )
         p_m = m_preds["proba"].values
         _, p_delong = delong_test(y_all, p_m, p_ch)
         m_aucs = df[df.model == m].sort_values("fold_idx")["auc"].values
@@ -2875,8 +2940,8 @@ Expected: PASSED — every coefficient within ±0.05.
 | 3 | `test_special_codes_isolated` passes | `uv run pytest tests/test_woe_logit.py::test_special_codes_isolated -v` |
 | 4 | `test_signature_only_consumes_train_rows` + `test_inner_cap_uses_inner_train_only` (no-leakage guards) | `uv run pytest tests/test_tuning.py -k "signature_only or inner_cap_uses" -v` |
 | 5 | `test_caps_derived_from_train_only` + `test_run_one_fold_passes_correct_labels` (label-alignment regression) | `uv run pytest tests/test_preprocessing.py::test_caps_derived_from_train_only tests/test_runner.py::test_run_one_fold_passes_correct_labels -v` |
-| 6 | per_fold CSVs have 80 rows each | `wc -l results/per_fold_*.csv` |
-| 7 | predictions parquets have 8,000 rows each; per-fold parts directories exist with 10 parts each | `uv run python -c "import pandas as pd; print(len(pd.read_parquet('results/predictions_defaults.parquet')), len(pd.read_parquet('results/predictions_tuned.parquet')))"; ls results/predictions_defaults_parts/ results/predictions_tuned_parts/ | wc -l` |
+| 6 | per_fold CSVs have 80 data rows each (excluding header) | `uv run python -c "import pandas as pd; [print(p, len(pd.read_csv(p))) for p in ['results/per_fold_defaults.csv', 'results/per_fold_tuned.csv']]"` — both must print `80` |
+| 7 | predictions parquets have 8,000 rows each; per-fold parts directories exist with exactly 10 parts each | `uv run python -c "import pandas as pd; [print(p, len(pd.read_parquet(p))) for p in ['results/predictions_defaults.parquet', 'results/predictions_tuned.parquet']]"` (both 8000) and `find results/predictions_defaults_parts results/predictions_tuned_parts -name 'fold_*.parquet' \| wc -l` (must print `20`) |
 | 8 | Summary MDs begin with disclaimer + contain both DeLong and Wilcoxon | `head -3 results/summary_*.md; grep -l 'DeLong' results/summary_*.md; grep -l 'Wilcoxon' results/summary_*.md` |
 | 9 | Analysis notebook executes end-to-end | Already done in Task 22 step 3 |
 | 10 | Wall-clock ≤ 3 hours combined | Recorded during Tasks 19 + 20 |

@@ -10,7 +10,7 @@
 
 Benchmark four tabular foundation models (TFMs) against a fold-safe re-implementation of the `pd-autopilot` WoE-logit champion (run `2026-03-17_071354`) on the German Credit dataset, with classical gradient-boosting and plain-logit baselines as reference points.
 
-**Research question (locked):** *Pure discrimination — can a TFM beat WoE-logit on AUC/Gini/KS/Brier/log-loss under matched cross-validation?* Calibration, rating-grade construction, and regulatory validation tests are explicitly out of scope.
+**Research question (locked):** *Pure discrimination — can a TFM beat WoE-logit on AUC/Gini/KS under matched cross-validation?* Brier and log-loss are reported as **secondary probability-quality metrics** (see §5) — they combine discrimination with calibration, so they are not part of the primary claim. Calibration, rating-grade construction, and regulatory validation tests are explicitly out of scope.
 
 **Scope of claim (narrow):** This benchmark addresses *discriminatory power only*. It does NOT support the broader claim that "TFMs are better PD models" — that would require calibration quality, rating-grade homogeneity/heterogeneity, PSI stability, and out-of-time validation, all of which the `pd-autopilot` pipeline provides for the incumbent but are out of scope here. The thesis chapter, results notebook, and every generated `summary_*.md` must reproduce this caveat verbatim in their headers.
 
@@ -175,7 +175,7 @@ The report's published 0.8065 was computed on `loans_clean.csv` with bins fit on
 
 ## 11. Reporting artefacts
 
-- `results/summary_defaults.md` and `summary_tuned.md` — every file begins with the **narrow-claim disclaimer** from §1 reproduced verbatim, then a headline table with mean ± std AUC/Gini/KS/Brier/log-loss and **both** DeLong and Wilcoxon paired p-values (raw + Bonferroni). DeLong and Wilcoxon are computed in `src/summary.py` from the predictions parquet — they are not deferred to the notebook.
+- `results/summary_defaults.md` and `summary_tuned.md` — every file begins with the **narrow-claim disclaimer** from §1 reproduced verbatim, then a headline table with mean ± std for the primary discrimination metrics (AUC, Gini, KS) followed by the secondary probability-quality metrics labelled "Brier (sec.)" and "LOGLOSS (sec.)", and **both** DeLong and Wilcoxon paired p-values (raw + Bonferroni). DeLong and Wilcoxon are computed in `src/summary.py` from the predictions parquet — they are not deferred to the notebook. `src/summary.py` MUST hard-assert that every challenger's sorted `(fold_idx, test_idx, y)` exactly matches the champion's before running paired tests; a mismatch raises `AssertionError` because a misaligned parquet would yield silently-wrong p-values.
 - Three context rows always shown beneath the headline: report's in-sample 0.8109, report's 10-fold CV 0.8065, this-run full-sample `woe_logit` refit (sanity). The context rows are clearly flagged as not directly comparable to the in-fold benchmark rows (different preprocessing path, different fold seed).
 - `notebooks/01_results_analysis.ipynb` consumes the same predictions parquet and adds: ROC overlay, reliability curves, AUC boxplot, forest plot of paired diffs, runtime table.
 
