@@ -79,3 +79,11 @@ def delong_test(y_true: np.ndarray, prob_a: np.ndarray, prob_b: np.ndarray) -> t
     z = (aucs[0] - aucs[1]) / np.sqrt(var)
     pval = 2 * (1 - stats.norm.cdf(abs(z)))
     return float(z), float(pval)
+
+def wilcoxon_paired(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """Paired Wilcoxon signed-rank test on per-fold metric differences."""
+    res = stats.wilcoxon(a, b, zero_method="wilcox", alternative="two-sided")
+    return float(res.statistic), float(res.pvalue)
+
+def bonferroni(pval: float, n_comparisons: int) -> float:
+    return float(min(1.0, pval * n_comparisons))

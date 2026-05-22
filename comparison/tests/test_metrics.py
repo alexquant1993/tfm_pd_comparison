@@ -41,3 +41,16 @@ def test_delong_better_model_significant():
     p_good = y + rng.normal(0, 0.3, 500)
     z, pval = delong_test(y, p_bad, p_good)
     assert pval < 0.01
+
+from src.metrics import wilcoxon_paired, bonferroni
+
+def test_wilcoxon_paired_returns_pval():
+    np.random.seed(0)
+    a = np.random.random(10)
+    b = a + 0.05
+    stat, p = wilcoxon_paired(a, b)
+    assert p < 0.05
+
+def test_bonferroni_clips_to_one():
+    assert bonferroni(0.5, 5) == 1.0
+    assert bonferroni(0.01, 7) == 0.07
