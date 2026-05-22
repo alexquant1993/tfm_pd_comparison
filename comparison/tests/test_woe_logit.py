@@ -32,21 +32,51 @@ def test_determinism():
     b = m.fit_predict(X_tr, y.iloc[:800], X_te, meta, seed=42)
     np.testing.assert_allclose(a, b)
 
-def test_special_codes_isolated():
-    """After fitting, the three special-coded variables must have a dedicated
-    bin for their special value. Verifies _parse_special_codes wiring is wired
-    through to OptimalBinning."""
+def test_special_codes_isolated_and_routed_at_transform():
+    """After fitting, each special-coded variable must (a) have a dedicated
+    Special bin in the binner AND (b) actually route special values to that
+    bin's empirical WoE at .transform() time — NOT silently map them to 0.
+
+    Regression guard for the silent-WoE-zero bug: optbinning's default
+    transform behaviour maps special codes to WoE=0 unless
+    metric_special="empirical" is passed. Without that kwarg, special-coded
+    rows are stripped of their bin information and every downstream
+    coefficient is corrupted.
+    """
+    import numpy as np
     X, y, meta = load(repo_root=REPO_ROOT)
     X_tr, _, _ = fold_safe_iqr_cap(X, X.iloc[:1], meta)
     m = WoELogitChampion()
     m.fit_predict(X_tr, y, X_tr.iloc[:1], meta, seed=42)
+
     for col, special in [("Account Balance", 4),
                          ("Value Savings/Stocks", 5),
                          ("Most valuable available asset", 4)]:
         binner = m._binners[col]
         bin_table = binner.binning_table.build()
-        assert any("Special" in str(row) for row in bin_table["Bin"].astype(str)), \
-            f"{col} missing Special bin (special_code={special})"
+
+        # (a) Structural: the Special bin exists in the table
+        special_rows = bin_table[bin_table["Bin"].astype(str).str.contains("Special")]
+        assert len(special_rows) > 0, f"{col} missing Special bin in binning_table"
+
+        # (b) Behavioural: transform(special_value) returns NON-ZERO WoE
+        # (the WoE from the Special bin, not silently zeroed)
+        special_arr = np.array([float(special)])
+        woe_via_transform = binner.transform(
+            special_arr, metric="woe", metric_special="empirical"
+        )
+        assert abs(woe_via_transform[0]) > 1e-6, (
+            f"{col}: transform(special_code={special}) returned ~0, "
+            f"indicating the special bin's WoE was silently dropped"
+        )
+
+        # (c) The transform-time WoE matches the binning_table's reported WoE
+        # for the Special bin (within float precision)
+        expected_special_woe = float(special_rows.iloc[0]["WoE"])
+        assert abs(woe_via_transform[0] - expected_special_woe) < 1e-4, (
+            f"{col}: transform returned {woe_via_transform[0]:.4f} but "
+            f"binning_table Special row shows WoE={expected_special_woe:.4f}"
+        )
 
 def test_full_sample_refit_matches_report_coefficients():
     """GATING TEST: every coefficient (intercept + 8 slopes) must be within

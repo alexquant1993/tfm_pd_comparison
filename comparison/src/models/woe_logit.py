@@ -7,6 +7,7 @@ Spec §8 requirements honoured here:
 - 8 champion variables fixed at the class level
 """
 from __future__ import annotations
+import sys
 import numpy as np
 import pandas as pd
 from optbinning import OptimalBinning
@@ -42,12 +43,17 @@ def _fit_one_binning(col: str, X_tr: pd.DataFrame, y_tr: pd.Series, meta: dict) 
         name=col,
         dtype=info["dtype"],
         monotonic_trend=MONOTONIC_TRENDS[col],
+        # If special_codes is an empty list, normalise to None for OptimalBinning.
         special_codes=info["special_codes"] or None,
     )
     try:
         ob = OptimalBinning(solver="cp", **common)
         ob.fit(X_tr[col].values, y_tr.values)
-    except Exception:
+    except (ValueError, RuntimeError) as e:
+        # Documented Stage-03 behaviour: CP solver occasionally fails on
+        # certain ordinal-ascending cases; MIP is a stable fallback.
+        print(f"[woe_logit] CP solver failed for {col!r} ({type(e).__name__}: {e}); "
+              f"falling back to MIP solver", file=sys.stderr)
         ob = OptimalBinning(solver="mip", **common)
         ob.fit(X_tr[col].values, y_tr.values)
     return ob
