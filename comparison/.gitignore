@@ -7,3 +7,4 @@ results/per_fold_*.csv.lock
 *.egg-info/
 .DS_Store
 main.py
+_build_nb.py
