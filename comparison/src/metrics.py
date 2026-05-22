@@ -1,6 +1,7 @@
 """Discrimination + scoring-rule metrics + paired statistical tests."""
 from __future__ import annotations
 import numpy as np
+from scipy import stats
 from sklearn.metrics import roc_auc_score, roc_curve, brier_score_loss, log_loss
 
 _EPS = 1e-15
@@ -20,8 +21,6 @@ def compute_all(y_true: np.ndarray, y_prob: np.ndarray) -> dict:
         "brier": float(brier_score_loss(y_true, y_prob)),
         "logloss": float(log_loss(y_true, y_prob, labels=[0, 1])),
     }
-
-from scipy import stats
 
 def _compute_midrank(x: np.ndarray) -> np.ndarray:
     J = np.argsort(x)
