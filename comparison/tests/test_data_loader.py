@@ -50,3 +50,26 @@ def test_carte_decode_keeps_continuous_numeric():
     X_str = carte_decode(X, meta)
     assert pd.api.types.is_numeric_dtype(X_str["Age (years)"])
     assert pd.api.types.is_numeric_dtype(X_str["Credit Amount"])
+
+def test_load_raises_on_unknown_type(tmp_path, monkeypatch):
+    """If variable_types.csv has an unknown Type, load() must raise — not silently default."""
+    # Build a temp fake repo
+    fake_repo = tmp_path / "fakerepo"
+    (fake_repo / "data").mkdir(parents=True)
+    # Minimal loans.csv
+    pd.DataFrame({"Creditability": [0, 1], "X": [1, 2]}).to_csv(fake_repo / "data" / "loans.csv", index=False)
+    # variable_types.csv with a bogus Type
+    pd.DataFrame({
+        "Variable": ["Creditability", "X"],
+        "UCI_Attribute": ["", ""],
+        "UCI_Type": ["", ""],
+        "Type": ["Target", "Bogus"],
+        "dtype": ["", "numerical"],
+        "Monotonicity": ["", "yes"],
+        "SpecialCodes": ["", ""],
+        "Values": ["", ""],
+        "Encoding": ["", ""],
+    }).to_csv(fake_repo / "data" / "variable_types.csv", index=False)
+    import pytest
+    with pytest.raises(ValueError, match="Unknown Type"):
+        load(repo_root=fake_repo)

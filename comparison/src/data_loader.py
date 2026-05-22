@@ -18,9 +18,11 @@ def _parse_encoding(encoding_str) -> dict[int, str]:
     if not isinstance(encoding_str, str):
         return {}
     mapping: dict[int, str] = {}
+    # Strip "(A11)"-style UCI annotations, fold "Special:" into the comma list.
     cleaned = re.sub(r"\([^)]*\)", "", encoding_str)
     cleaned = cleaned.replace("Special:", ",")
-    for part in re.split(r"[,.]", cleaned):
+    cleaned = cleaned.rstrip(".")
+    for part in cleaned.split(","):
         m = re.match(r"\s*(-?\d+)\s*=\s*(.+?)\s*$", part)
         if m:
             mapping[int(m.group(1))] = m.group(2).strip()
@@ -81,9 +83,15 @@ def load(repo_root: Path | str) -> tuple[pd.DataFrame, pd.Series, dict]:
         col = row["Variable"]
         if col == TARGET or col not in X.columns:
             continue
+        if row["Type"] not in type_map:
+            raise ValueError(f"Unknown Type {row['Type']!r} for variable {col!r}")
+        if not isinstance(row["dtype"], str):
+            raise ValueError(f"Missing or non-string dtype for variable {col!r}: got {row['dtype']!r}")
         meta[col] = {
-            "type": type_map.get(row["Type"], "continuous"),
-            "dtype": row["dtype"] if isinstance(row["dtype"], str) else "numerical",
+            "type": type_map[row["Type"]],
+            "dtype": row["dtype"],
+            # Monotonicity NaN is semantically valid: nominal variables legitimately have
+            # no monotonicity expectation in variable_types.csv, so we silently default to "no".
             "monotonicity": row["Monotonicity"] if isinstance(row["Monotonicity"], str) else "no",
             "special_codes": _parse_special_codes(row.get("SpecialCodes")),
             "encoding": _parse_encoding(row.get("Encoding")),
@@ -104,6 +112,10 @@ def carte_decode(X: pd.DataFrame, meta: dict) -> pd.DataFrame:
         encoding = info["encoding"]
         if not encoding:
             continue
-        out[col] = out[col].map(lambda v: encoding.get(int(v), str(v)) if pd.notna(v) else v)
+        out[col] = out[col].map(
+            lambda v: encoding.get(int(v), str(v))
+            if pd.notna(v) and not isinstance(v, str)
+            else v
+        )
         out[col] = out[col].astype(object)
     return out
