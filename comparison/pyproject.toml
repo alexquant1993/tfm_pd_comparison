@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Benchmark 4 tabular foundation models against the pd-autopilot WoE-logit champion on German Credit."
 requires-python = ">=3.12"
 dependencies = [
+    "carte-ai>=0.0.26",
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
     "lightgbm>=4.6.0",
@@ -18,6 +19,7 @@ dependencies = [
     "tabdpt>=1.1.14",
     "tabicl>=2.1.1",
     "tabpfn>=2.0,<7.0",
+    "torch>=2.12.0",
     "tqdm>=4.67.3",
     "xgboost>=3.2.0",
 ]
