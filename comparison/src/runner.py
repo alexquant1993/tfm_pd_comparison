@@ -10,12 +10,18 @@ Per-fold pipeline (in order):
 from __future__ import annotations
 
 # IMPORTANT: set BEFORE any numerical libs are imported. PyTorch (via TFM
-# wrappers) bundles its own libomp; LightGBM links against Homebrew libomp.
-# When both load into the same process, the second can either segfault
-# (LightGBM-after-torch) or deadlock (TabPFN-after-LightGBM). This env var
-# tells OpenMP's runtime to tolerate co-loading and pick one set of threads.
+# wrappers) bundles its own libomp; LightGBM and XGBoost link against Homebrew
+# libomp. Co-loading two libomp runtimes in one process segfaults on macOS
+# arm64 — empirically the only combination that survives end-to-end is:
+#   1. KMP_DUPLICATE_LIB_OK=TRUE    (allows co-loading)
+#   2. OMP_NUM_THREADS=1            (neutralises XGB/LGBM thread pool init)
+#   3. LGBMClassifier(n_jobs=1)     (forces LightGBM to single-thread; see
+#                                    src/models/lgbm.py default)
+#   4. Lazy import each TFM wrapper right before its fit_predict call (below)
+# Removing ANY of the four reintroduces a segfault somewhere in the pipeline.
 import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
 import csv
@@ -73,36 +79,60 @@ def run_one_fold_one_model(model, X_train, y_train, X_test, y_test, meta) -> tup
     return m, proba
 
 
-def _build_models_for_fold(pass_name: str, tuned_params: dict | None) -> list:
-    """Construct one instance per model for this outer fold.
+def _iter_model_builders(pass_name: str, tuned_params: dict | None):
+    """Yield (name, builder) pairs where builder() returns a fresh wrapper.
 
-    Model order matters: TFMs (torch-bundled libomp) run BEFORE the
-    OpenMP-heavy gradient boosters (xgb, lgbm) to reduce the chance of
-    OpenMP runtime contention. CARTE is excluded from the primary thesis
-    scope (see README).
+    Critical: the wrapper module imports happen INSIDE each builder, not at
+    function entry. Pre-importing all 7 wrappers up-front loads both torch
+    (via tabpfn/tabicl/tabdpt) and Homebrew libomp (via xgb/lgbm) into the
+    same process before the first fit_predict, which segfaults TabPFN on
+    macOS arm64. Lazy per-builder imports let torch initialise its libomp
+    cleanly in the TFM builders, and the GBM libs in their own.
+
+    Model order: woe_logit, plain logit, 3 TFMs, then XGB, LGBM. CARTE
+    excluded from the primary thesis lineup (see README).
 
     For Pass 1: all 7 models with defaults.
-    For Pass 2: classicals use tuned_params from this fold's nested study;
-                woe_logit + 3 TFMs unchanged (their pass-1 rows will be reused).
+    For Pass 2: classicals use tuned_params; woe_logit + 3 TFMs unchanged
+                (their pass-1 rows are reused upstream).
     """
-    from src.models.woe_logit import WoELogitChampion
-    from src.models.logit import PlainLogit
-    from src.models.tabpfn import TabPFNWrapper
-    from src.models.tabicl import TabICLWrapper
-    from src.models.tabdpt import TabDPTWrapper
-    from src.models.xgb import XGBWrapper
-    from src.models.lgbm import LGBMWrapper
-
     tp = tuned_params or {}
-    return [
-        WoELogitChampion(),
-        PlainLogit(params=tp.get("logit")),
-        TabPFNWrapper(),
-        TabICLWrapper(),
-        TabDPTWrapper(),
-        XGBWrapper(params=tp.get("xgb")),
-        LGBMWrapper(params=tp.get("lgbm")),
-    ]
+
+    def b_woe():
+        from src.models.woe_logit import WoELogitChampion
+        return WoELogitChampion()
+
+    def b_logit():
+        from src.models.logit import PlainLogit
+        return PlainLogit(params=tp.get("logit"))
+
+    def b_tabpfn():
+        from src.models.tabpfn import TabPFNWrapper
+        return TabPFNWrapper()
+
+    def b_tabicl():
+        from src.models.tabicl import TabICLWrapper
+        return TabICLWrapper()
+
+    def b_tabdpt():
+        from src.models.tabdpt import TabDPTWrapper
+        return TabDPTWrapper()
+
+    def b_xgb():
+        from src.models.xgb import XGBWrapper
+        return XGBWrapper(params=tp.get("xgb"))
+
+    def b_lgbm():
+        from src.models.lgbm import LGBMWrapper
+        return LGBMWrapper(params=tp.get("lgbm"))
+
+    yield ("woe_logit",  b_woe)
+    yield ("logit",      b_logit)
+    yield ("tabpfn_v2",  b_tabpfn)
+    yield ("tabicl",     b_tabicl)
+    yield ("tabdpt",     b_tabdpt)
+    yield ("xgb",        b_xgb)
+    yield ("lgbm",       b_lgbm)
 
 
 # Which models are unchanged between Pass 1 and Pass 2 → their pass-2 rows are
@@ -156,37 +186,38 @@ def run_pass(pass_name: str, n_splits: int = 10, seed: int = 42) -> None:
             tuned_params = tune_classicals_for_fold(X_tr_raw, y_tr, meta, seed=seed)
             _log(f"fold {fold_i+1}: tuning done")
 
-        models = _build_models_for_fold(pass_name, tuned_params)
+        builders = list(_iter_model_builders(pass_name, tuned_params))
         fold_preds: list[pd.DataFrame] = []
-        for model in tqdm(models, desc=f"fold {fold_i+1}/{n_splits}",
-                          leave=True, file=sys.stderr):
+        for name, build in tqdm(builders, desc=f"fold {fold_i+1}/{n_splits}",
+                                leave=True, file=sys.stderr):
             # Pass 2 shortcut: reuse pass-1 rows for unchanged models
-            if pass_name == "tuned" and model.name in COPY_FROM_PASS1:
-                _log(f"fold {fold_i+1}: {model.name} → reusing pass-1 row")
-                row = pass1_metrics[(pass1_metrics["model"] == model.name) &
+            if pass_name == "tuned" and name in COPY_FROM_PASS1:
+                _log(f"fold {fold_i+1}: {name} → reusing pass-1 row")
+                row = pass1_metrics[(pass1_metrics["model"] == name) &
                                     (pass1_metrics["fold_idx"] == fold_i)].iloc[0].to_dict()
                 row["pass"] = "tuned"
                 append_row(out_csv, row)
-                copy_preds = pass1_preds[(pass1_preds["model"] == model.name) &
+                copy_preds = pass1_preds[(pass1_preds["model"] == name) &
                                          (pass1_preds["fold_idx"] == fold_i)].copy()
                 fold_preds.append(copy_preds)
                 continue
 
             X_tr_use, X_te_use = X_tr_capped, X_te_capped
 
-            _log(f"fold {fold_i+1}: {model.name} → starting fit_predict")
+            _log(f"fold {fold_i+1}: {name} → instantiating + starting fit_predict")
             t0 = time.perf_counter()
+            model = build()    # ← lazy import + instantiation happens HERE
             row, proba = run_one_fold_one_model(
                 model, X_tr_use, y_tr, X_te_use, y_te, meta,
             )
-            _log(f"fold {fold_i+1}: {model.name} → done in {time.perf_counter() - t0:.1f}s "
+            _log(f"fold {fold_i+1}: {name} → done in {time.perf_counter() - t0:.1f}s "
                  f"(auc={row['auc']:.4f})")
             row["fold_idx"] = fold_i
             row["pass"] = pass_name
             append_row(out_csv, row)
 
             fold_preds.append(pd.DataFrame({
-                "model": model.name,
+                "model": name,
                 "fold_idx": fold_i,
                 "test_idx": te,
                 "y": y_te.values,

@@ -21,7 +21,14 @@ class LGBMWrapper:
             X_te[c] = X_te[c].astype(pd.CategoricalDtype(categories=X_tr[c].cat.categories))
         params = dict(
             random_state=seed,
-            n_jobs=-1,
+            # n_jobs=1 (single-thread) is REQUIRED when LightGBM coexists with
+            # torch (TFM wrappers) in the same Python process on macOS arm64.
+            # n_jobs=-1 segfaults LGBMClassifier.fit() because LightGBM's
+            # libomp thread pool conflicts with torch's bundled libomp.
+            # See runner.py top-of-file comment for the full picture.
+            # The tuning module (src/tuning.py) overrides this to -1 because
+            # it runs in a torch-free process.
+            n_jobs=1,
             verbosity=-1,
         )
         params.update(self.params)
