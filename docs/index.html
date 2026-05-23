@@ -163,7 +163,7 @@
 
 <!-- ========== HERO ========== -->
 <div class="hero">
-  <h1>Can Tabular Foundation Models <span>beat</span> a production PD scorecard?</h1>
+  <h1>Can Tabular Foundation Models <span>beat</span> a production-style PD scorecard?</h1>
   <p class="subtitle">
     A fair, same-fold, same-data comparison of three TFMs against a
     WoE-logistic-regression champion on the German Credit dataset.
@@ -189,7 +189,7 @@
     remains within the noise band of a 1,000-observation dataset.
   </p>
   <div class="callout">
-    <strong>Bottom line:</strong> TFMs are competitive with production-grade scorecards on small
+    <strong>Bottom line:</strong> TFMs are competitive with production-style scorecards on small
     credit-risk datasets. They don't decisively win, but the fact that zero-shot / minimal-config
     models match a hand-tuned WoE pipeline is remarkable for practitioners.
   </div>
@@ -203,7 +203,7 @@
   <p>
     Most TFM papers (TabPFN, TabICL, TabDPT) evaluate on raw UCI datasets with
     default preprocessing. But credit-risk practitioners don't build models that way.
-    A production PD scorecard involves:
+    A production-style PD scorecard involves:
   </p>
   <ul>
     <li>Weight-of-Evidence (WoE) binning with monotonicity constraints</li>
@@ -219,15 +219,15 @@
 
   <h3>What we did differently</h3>
   <div class="callout">
-    <strong>Key design choice:</strong> We built a full production-grade PD scorecard first
+    <strong>Key design choice:</strong> We built a full production-style PD scorecard first
     (using the <code>pd-autopilot</code> pipeline), then ran every model — TFMs included — on
     the <em>same raw data, same folds, same evaluation protocol</em>.
   </div>
   <ul>
-    <li><strong>Same data:</strong> All 7 models see the original 1,000 observations with 20 raw features (before WoE) — no data leakage from the champion's preprocessing pipeline.</li>
+    <li><strong>Same data:</strong> All 7 models are evaluated on the same 1,000 observations and fold splits. TFMs and raw-feature classical models see the 20 original features; the champion uses its fixed 8-variable WoE representation.</li>
     <li><strong>Same folds:</strong> All models share the exact 10-fold CV split (seed=42, stratified). Per-fold AUC differences are paired, not independent.</li>
-    <li><strong>Same evaluation:</strong> Out-of-fold predictions concatenated, then AUC / Gini / KS computed identically for all models.</li>
-    <li><strong>Champion gets its own features:</strong> The WoE-logistic model uses its own WoE-transformed features (as it would in production), while TFMs and raw-feature classicals get the original features. This is fair — each model gets its natural input.</li>
+    <li><strong>Same evaluation:</strong> AUC / Gini / KS are reported as fold mean &plusmn; standard deviation; concatenated out-of-fold predictions are used for ROC plots and paired DeLong tests.</li>
+    <li><strong>Champion gets its own features:</strong> The WoE-logistic model uses its own WoE-transformed features (as it would in a scorecard pipeline), while TFMs and raw-feature classicals get the original features. This is fair — each model gets its natural input.</li>
   </ul>
 
   <h3>Why 10-fold cross-validation?</h3>
@@ -236,9 +236,9 @@
     10-fold stratified CV gives every observation exactly one out-of-fold prediction, enabling:
   </p>
   <ul>
-    <li><strong>Paired statistical tests</strong> (DeLong, Wilcoxon) — testing whether model A beats model B on the same patients, not on different random subsets.</li>
+    <li><strong>Paired statistical tests</strong> (DeLong, Wilcoxon) — testing whether model A beats model B on the same borrowers, not on different random subsets.</li>
     <li><strong>Variance estimates</strong> — the &plusmn; in our AUC numbers comes from fold-level variation, showing how unstable each model is.</li>
-    <li><strong>No cherry-picking</strong> — every observation is scored exactly once, so the concatenated AUC is an honest out-of-sample estimate.</li>
+    <li><strong>No cherry-picking</strong> — every observation is scored exactly once, so concatenated out-of-fold predictions provide an honest out-of-sample basis for ROC plots and paired tests.</li>
   </ul>
 
   <h3>Why results differ from the original report</h3>
@@ -309,8 +309,8 @@
 
   <div class="callout">
     <strong>Key takeaway:</strong> Tuning improved XGBoost by +1.1 pp (0.776 &rarr; 0.787) and narrowed
-    the gap to TFMs, but didn't close it. The TFM advantage is persistent — roughly +1.2 pp over the
-    best tuned classical — but not statistically significant on this sample size.
+    the gap to TFMs, but didn't close it. The TFM advantage is persistent — about +1.2 to +1.4 pp over
+    the best tuned classical models — but not statistically significant on this sample size.
   </div>
 </section>
 
@@ -393,7 +393,7 @@
       </ul>
       <p><strong>Classical baselines:</strong></p>
       <ul>
-        <li><strong>WoE-Logistic</strong> — production champion with WoE binning, IV selection, monotonicity constraints (C=10<sup>10</sup>)</li>
+        <li><strong>WoE-Logistic</strong> — production-style champion with WoE binning, IV selection, monotonicity constraints, and near-unregularized logistic regression</li>
         <li><strong>Logistic Regression</strong> — raw features, no WoE</li>
         <li><strong>XGBoost</strong> — default, then Optuna-tuned</li>
         <li><strong>LightGBM</strong> — default, then Optuna-tuned</li>
@@ -443,7 +443,7 @@
 <footer>
   <p>
     Built as part of a Master's thesis comparing Tabular Foundation Models against
-    production PD scorecards. Dataset: UCI German Credit (Statlog).
+    production-style PD scorecards. Dataset: UCI German Credit (Statlog).
     <br>
     &copy; 2026 Anderson Arroyo &middot;
     <a href="https://github.com/alexquant1993/tfm_pd_comparison">GitHub</a>
