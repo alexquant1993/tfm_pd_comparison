@@ -87,6 +87,15 @@ class WoELogitChampion:
         self._binners = _fit_binning(X_train, y_train, types_meta)
         Z_tr = _transform(self._binners, X_train)
         Z_te = _transform(self._binners, X_test)
-        self._lr = LogisticRegression(penalty=None, solver="lbfgs", max_iter=1000, random_state=seed)
+        # C=1e10 is effectively unregularised (the L2 penalty coefficient 1/C
+        # is 10⁻¹⁰, which on 1000 rows × 8 features cannot meaningfully shift
+        # any coefficient — the gradient at the MLE is ~unit-scale). We use
+        # this instead of:
+        #   - penalty=None: deprecated in sklearn 1.8, removed in 1.10
+        #   - C=np.inf: triggers sklearn's internal penalty=None translation
+        #               and the corresponding warning
+        # The gating test (test_full_sample_refit_matches_report_coefficients,
+        # ±0.05 tol vs model_params.json) passes identically with C=1e10.
+        self._lr = LogisticRegression(C=1e10, solver="lbfgs", max_iter=1000, random_state=seed)
         self._lr.fit(Z_tr, y_train.values)
         return self._lr.predict_proba(Z_te)[:, 1]
