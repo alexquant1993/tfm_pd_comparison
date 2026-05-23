@@ -1,12 +1,19 @@
 # TFM vs WoE-Logit Comparison
 
-Benchmarks 4 tabular foundation models against the pd-autopilot WoE-logit
-champion on German Credit. See
+Benchmarks **3 in-context tabular foundation models** (TabPFN v2, TabICL,
+TabDPT) against the pd-autopilot WoE-logit champion on German Credit, plus
+plain logit / XGBoost / LightGBM as classical baselines. See
 [design spec](../docs/superpowers/specs/2026-05-22-tfm-comparison-design.md).
 
 **Scope (narrow):** Pure discrimination only. Does NOT support the claim that
 "TFMs are better PD models" — that would require calibration, rating grades,
 PSI, and OOT validation, all out of scope here.
+
+**Note on CARTE:** the CARTE wrapper (`src/models/carte.py`) is implemented
+and tested but excluded from the primary lineup because it needs a ~7 GB
+FastText embedding file and the marginal value on German Credit's
+semantically-thin categorical labels is likely small. See "Re-enabling CARTE"
+below if you want to include it.
 
 ## Setup
 
@@ -34,13 +41,17 @@ uv run jupyter lab notebooks/        # interactive analysis
 - `results/summary_defaults.md`, `results/summary_tuned.md` — paired tests, mean ± std tables
 - `results/figures/` — ROC overlays, reliability curves, AUC boxplots, forest plots
 
-## Enabling CARTE (optional)
+## Re-enabling CARTE (optional)
 
-The CARTE foundation model needs a ~7 GB FastText embedding file
-(`cc.en.300.bin`) before its slow test can run. Without it, `pytest -m slow`
-skips only the CARTE test; all other TFMs run normally.
+Two steps if you want CARTE back in the lineup:
 
-One-time download (Python helper, ~10 min on a fast connection):
+**1. Add CARTE to the runner's model list.** Edit `src/runner.py`:
+in `_build_models_for_fold` add `CARTEWrapper()` to the returned list
+(import it at the top of the function), and add `"carte"` to the
+`COPY_FROM_PASS1` set so pass 2 reuses its pass-1 rows.
+
+**2. Download the FastText embedding file** (~7 GB, ~10 min on a fast
+connection):
 
 ```bash
 uv run python -c \
@@ -56,5 +67,5 @@ curl -L -o \
 gunzip .venv/lib/python3.12/site-packages/carte_ai/data/etc/cc.en.300.bin.gz
 ```
 
-Once present, CARTE participates in the full `uv run pytest -m slow` run and
-in pipeline passes 1 and 2.
+Without FastText the CARTE wrapper raises a clear `FileNotFoundError` with
+the download command in the message; the slow test for CARTE auto-skips.
