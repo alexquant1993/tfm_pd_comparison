@@ -1,90 +1,55 @@
-# pd-autopilot
+# TFM vs Production PD Scorecard — A Fair Benchmark
 
-Automated Probability of Default (PD) model development pipeline powered by Claude Code agents and the [pdtoolkit](https://github.com/at621/pdtoolkit_py) library.
+Can Tabular Foundation Models beat a production-grade PD scorecard built by an agentic AI system?
 
-## What it does
+This project benchmarks three Tabular Foundation Models (TabPFN v2, TabICL, TabDPT) against classical ML models and a WoE-logistic regression champion scorecard — all on the same data, same folds, same evaluation protocol.
 
-Takes a loan dataset and produces a fully documented PD model through automated stages, including parallel model comparison and a comprehensive Word report:
+The champion scorecard is built automatically by [pd-autopilot](https://github.com/at621/pd-autopilot), an agentic PD model development pipeline powered by Claude Code. The comparison framework then puts every model on equal footing using 10-fold stratified CV on the raw German Credit dataset.
 
-1. **Data Quality** — univariate analysis, missing values, correlations, outlier detection
-2. **Data Preparation** — imputation, outlier capping
-3. **Bivariate Analysis** — WoE/IV via OptimalBinning, variable shortlisting
-4. **Model Building** (three methods in parallel):
-   - **04a** MIV stepwise selection → logistic regression
-   - **04b** XGBoost feature importance → logistic regression
-   - **04c** Forward stepwise selection → logistic regression
-   - **04x** Model comparison → champion selection via weighted composite score
-5. **Calibration** — rating grades, calibrated PDs, stress testing
-6. **Validation** — discriminatory power, predictive power, homogeneity, heterogeneity, PSI
-7. **Report** — comprehensive Word document generated via pandoc
+**[View results](https://alexquant1993.github.io/tfm_pd_comparison/)**
 
-Each stage produces a Jupyter notebook, figures, a structured summary, and diagnostic fix proposals. A timestamped execution log tracks durations and key metrics.
+## Why this benchmark exists
 
-## Execution modes
+Published TFM papers evaluate against default-config baselines on raw data — not against the kind of model a bank would actually deploy. That comparison flatters TFMs by beating a straw man. Here we compare against a full production pipeline: WoE binning with monotonicity constraints, IV-based variable selection, stepwise logistic regression, and expert-level calibration.
 
-- **Autonomous** — runs all stages end-to-end, presents consolidated results at the end
-- **HIL (Human-in-the-Loop)** — stops after each stage for review and approval; human can override shortlists, champion selection, or switch to autonomous mid-run
+## Key findings
+
+| Model | AUC (10-fold CV) | vs Champion |
+|---|---|---|
+| TabPFN v2 | 0.800 ± 0.051 | +1.6 pp |
+| TabICL | 0.800 ± 0.053 | +1.6 pp |
+| TabDPT | 0.794 ± 0.061 | +1.0 pp |
+| XGBoost (tuned) | 0.787 ± 0.056 | +0.3 pp |
+| WoE-Logistic | 0.784 ± 0.051 | ref |
+
+TFMs show a consistent edge, but it is **not statistically significant** (DeLong p ≈ 0.10, Bonferroni-corrected ≈ 0.58). Even after Optuna tuning the classical models, the TFM advantage persists but stays within the noise band of a 1,000-observation dataset.
 
 ## Project structure
 
 ```
-├── CLAUDE.md                        # Orchestrator instructions
-├── data/
-│   └── loans.csv                    # Input dataset
+comparison/
 ├── src/
-│   ├── pdtoolkit/                   # PD toolkit library
-│   ├── pipeline_fixes/              # Utility functions from fix-proposer diagnostics
-│   ├── scripts/
-│   │   └── format_report.py         # DOCX table formatting post-processor
-│   └── templates/
-│       └── doc_template.docx        # Word report style template
-├── runs/                            # Pipeline outputs (timestamped)
-│   └── YYYY-MM-DD_HHMMSS/
-│       ├── notebooks/               # 9 Jupyter notebooks (01-06, 04a/04b/04c/04x)
-│       ├── pipeline/                # Stage summaries, model params, execution.log
-│       ├── figures/                  # All plots
-│       ├── data/                    # Clean + binned datasets
-│       ├── report.md                # Report source
-│       └── report.docx              # Final Word report
-├── .claude/
-│   ├── agents/                      # 11 subagent definitions
-│   │   ├── 01-data-explorer.md
-│   │   ├── 02-data-preparer.md
-│   │   ├── 03-bivariate-analyst.md
-│   │   ├── 04a-model-builder-miv.md
-│   │   ├── 04b-model-builder-xgb.md
-│   │   ├── 04c-model-builder-fwd.md
-│   │   ├── 04x-model-comparator.md
-│   │   ├── 05-calibrator.md
-│   │   ├── 06-validator.md
-│   │   ├── 07-report-writer.md
-│   │   └── notebook-reviewer.md
-│   └── skills/                      # 5 shared skill definitions
-│       ├── pd-conventions/          # Domain thresholds (IV, AUC, WoE rules)
-│       ├── pdtoolkit-api/           # Complete function reference
-│       ├── notebook-writer/         # Notebook format conventions
-│       ├── output-verifier/         # Post-stage verification checklist
-│       └── fix-proposer/            # Diagnostic protocol for each stage
+│   ├── runner.py          # 10-fold CV orchestrator
+│   ├── tuning.py          # Nested Optuna tuning for classicals
+│   ├── summary.py         # Generates summary tables + statistical tests
+│   └── models/            # Thin wrappers: woe_logit, tabpfn, tabicl, tabdpt, xgb, lgbm
+├── notebooks/
+│   ├── 01_results_analysis.ipynb        # Figures for default hyperparameters
+│   └── 02_results_analysis_tuned.ipynb  # Figures for tuned hyperparameters
+└── results/
+    ├── per_fold_{defaults,tuned}.csv    # Per-fold metrics (70 rows each)
+    ├── predictions_{defaults,tuned}.parquet
+    ├── summary_{defaults,tuned}.md      # Full tables + DeLong/Wilcoxon tests
+    └── figures/                         # ROC, boxplot, forest plot, reliability
 ```
 
-## Prerequisites
+## Attribution
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- Python 3.10+ with: pandas, numpy, matplotlib, scikit-learn, statsmodels, jupyter, nbconvert, optbinning, xgboost, python-docx
-- [pandoc](https://pandoc.org/installing.html) (for Word report generation)
+- **[pd-autopilot](https://github.com/at621/pd-autopilot)** by [@at621](https://github.com/at621) — the agentic PD model development pipeline that builds the champion scorecard. This repository is a fork; the comparison framework in `comparison/` is the only addition.
+- **[pdtoolkit](https://github.com/at621/pdtoolkit_py)** by [@at621](https://github.com/at621) — the PD modelling library used by pd-autopilot.
+- **Dataset:** [German Credit (Statlog)](https://archive.ics.uci.edu/dataset/144/statlog+german+credit+data), UCI Machine Learning Repository.
+- **TFM implementations:** [TabPFN v2](https://github.com/PriorLabs/TabPFN), [TabICL](https://github.com/snovaisg/TabICL), [TabDPT](https://github.com/layer6ai-labs/TabDPT).
 
-## Usage
+## License
 
-Place your dataset at `data/loans.csv` and start Claude Code in the project directory.
-
-**Autonomous mode:**
-```
-Build a PD model on loans.csv
-```
-
-**HIL mode:**
-```
-Build a PD model on loans.csv, I want to review each stage
-```
-
-Results are saved to `runs/<timestamp>/`, including notebooks, figures, model parameters, execution log, and a Word report.
+The comparison framework follows the license of the upstream [pd-autopilot](https://github.com/at621/pd-autopilot) repository.

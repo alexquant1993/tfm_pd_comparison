@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+results/per_fold_*.csv.lock
+*.egg-info/
+.DS_Store
+main.py
+_build_nb.py
+_build_benchmark_nb.py
